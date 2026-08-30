@@ -16,8 +16,8 @@ set -euo pipefail
 HOST=${DEPLOY_HOST:-ubuntu@54.89.239.197}
 KEY=${DEPLOY_KEY:-$HOME/.ssh/geniein-new-v2.pem}
 DEST=/opt/genie-agents
-# 이 골격에 기대는 venv 들. 새 사용자가 생기면 여기 는다.
-USERS=${GENIE_USERS:-/opt/princess/yuna/venv /opt/princess/yena/venv}
+# 이 골격에 기대는 venv 들. `GENIE_USERS` 로 준다 — 골격이 사용자를 알면 안 된다.
+USERS=${GENIE_USERS:-}   # 예: "/opt/앱/venv /opt/다른앱/venv"
 
 cd "$(dirname "$0")/.."
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "git 저장소 안에서 돌려라" >&2; exit 1; }

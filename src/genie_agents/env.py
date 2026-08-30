@@ -19,7 +19,7 @@ VAR = "AGENT_PREFIX"
 
 
 def prefix() -> str:
-    """`YUNA` / `YENA`. 안 정해져 있으면 빈 문자열이고, 그러면 프리픽스 없는
+    """`ALPHA` 같은 것. 안 정해져 있으면 빈 문자열이고, 그러면 프리픽스 없는
     이름을 그대로 읽는다(시험과 도구에서 그 편이 편하다)."""
     return (os.environ.get(VAR) or "").strip().upper()
 

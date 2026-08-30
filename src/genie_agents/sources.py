@@ -19,7 +19,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Callable
 
-from . import clock
+from . import clock, env
 
 # 사용자가 있는 곳. {프리픽스}_LAT / {프리픽스}_LON / {프리픽스}_PLACE 로 바꾼다.
 # (하노이 21.0285 / 105.8542, 서울 37.5665 / 126.9780)
@@ -45,7 +45,7 @@ WMO = {
 
 def place() -> str:
     """사용자가 지금 있는 곳. 날씨·공기질이 여기 기준이고, 에이전트도 이걸 알아야 한다."""
-    return os.environ.get("YUNA_PLACE") or DEFAULT_PLACE
+    return env.get("PLACE") or DEFAULT_PLACE
 
 
 def _http_get_json(url: str, timeout: float = 10) -> dict:
@@ -64,9 +64,9 @@ class WeatherSource:
     """오늘 날씨 한 줄. 하루에 한 신호만 만든다 — 소음을 만들지 않기 위해."""
 
     name: str = "날씨"
-    lat: float = field(default_factory=lambda: float(os.environ.get("YUNA_LAT") or DEFAULT_LAT))
-    lon: float = field(default_factory=lambda: float(os.environ.get("YUNA_LON") or DEFAULT_LON))
-    place: str = field(default_factory=lambda: os.environ.get("YUNA_PLACE") or DEFAULT_PLACE)
+    lat: float = field(default_factory=lambda: env.num("LAT", DEFAULT_LAT))
+    lon: float = field(default_factory=lambda: env.num("LON", DEFAULT_LON))
+    place: str = field(default_factory=lambda: env.get("PLACE") or DEFAULT_PLACE)
     fetch_json: Callable[[str], dict] = field(default=_http_get_json)
 
     def url(self) -> str:
@@ -133,9 +133,9 @@ class AirQualitySource:
     """공기질. 하노이에서는 날씨보다 실질적인 날이 많다."""
 
     name: str = "공기질"
-    lat: float = field(default_factory=lambda: float(os.environ.get("YUNA_LAT") or DEFAULT_LAT))
-    lon: float = field(default_factory=lambda: float(os.environ.get("YUNA_LON") or DEFAULT_LON))
-    place: str = field(default_factory=lambda: os.environ.get("YUNA_PLACE") or DEFAULT_PLACE)
+    lat: float = field(default_factory=lambda: env.num("LAT", DEFAULT_LAT))
+    lon: float = field(default_factory=lambda: env.num("LON", DEFAULT_LON))
+    place: str = field(default_factory=lambda: env.get("PLACE") or DEFAULT_PLACE)
     fetch_json: Callable[[str], dict] = field(default=_http_get_json)
 
     def url(self) -> str:
@@ -212,7 +212,7 @@ DEFAULT_FEEDS = [
 
 
 def _feeds_from_env() -> list[tuple[str, str, list[str]]]:
-    raw = os.environ.get("YUNA_FEEDS")
+    raw = env.get("FEEDS")
     if not raw:
         return DEFAULT_FEEDS
     feeds = []
