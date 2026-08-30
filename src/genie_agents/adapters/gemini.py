@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
 from dataclasses import dataclass
 
@@ -39,7 +40,17 @@ _SCHEMA_KEYS = frozenset(
 
 
 class GeminiUnavailable(RuntimeError):
-    """google-genai 가 없거나 키가 없다."""
+    """google-genai 가 없거나 키가 없다.
+
+    무엇이 없는지와 **무엇을 하면 되는지**를 같이 적는다 — 띄우다 막힌 사람이
+    이 한 줄 말고 볼 것이 없다.
+    """
+
+    def __init__(self, why: str) -> None:
+        super().__init__(
+            f"Gemini 를 부를 수 없다: {why}\n"
+            "`pip install google-genai` 후 GEMINI_API_KEY 를 채워야 한다."
+        )
 
 
 def sanitize_schema(schema: dict) -> dict:
@@ -260,3 +271,128 @@ def default_model(fast: bool = False) -> str:
 
 def available() -> bool:
     return bool(os.environ.get("GEMINI_API_KEY"))
+
+
+def client(api_key: str | None = None):
+    """어댑터마다 같은 이름으로 낸다 — 러너가 이름 하나로 부른다."""
+    return GeminiClient(api_key) if api_key else GeminiClient()
+
+
+# ── Gemini 위에서 도는 에이전트가 공통으로 쓰는 것 ────────────────────
+#
+# 아래 넷은 **모델 사정**이지 그 에이전트가 누구인지가 아니다. 전에는 에이전트
+# 파일 안에 있었고, 그래서 Gemini 위의 두 번째 에이전트는 값표부터 다시 적어야
+# 했다. 갈리는 자리가 아니라 **어댑터가 감당할 자리**다.
+
+
+@dataclass(frozen=True)
+class Price:
+    """$/MTok. `hi` 가 있는 모델은 프롬프트가 `threshold` 를 넘으면 그쪽을 쓴다.
+
+    Gemini 는 캐시 **읽기**만 값이 다르다. 쓰기는 토큰당 값이 없어서(암묵 캐시)
+    Anthropic 쪽의 5분/1시간 TTL 구분이 여기엔 없다.
+    """
+
+    inp: float
+    out: float
+    cache: float
+    inp_hi: float = 0.0
+    out_hi: float = 0.0
+    cache_hi: float = 0.0
+    threshold: int = 0
+
+
+# 2026-08-29 ai.google.dev/gemini-api/docs/pricing 유료 티어 실측.
+#
+# **쓰는 모델이 여기 없으면 장부가 돈을 아예 안 찍는다** — cost 가 None 이 되고
+# 토큰만 남는다. 모델을 갈아끼우면 여기도 같이 봐야 한다.
+PRICES: dict[str, Price] = {
+    "gemini-2.5-pro": Price(
+        inp=1.25, out=10.00, cache=0.125,
+        inp_hi=2.50, out_hi=15.00, cache_hi=0.25, threshold=200_000,
+    ),
+    "gemini-2.5-flash": Price(inp=0.30, out=2.50, cache=0.03),
+}
+
+
+def cost(turn) -> float | None:
+    """이 턴에 나간 돈(USD). 값을 모르는 모델이면 None.
+
+    ★ 문턱은 **한 프롬프트**로 본다. 토큰 수는 도구를 돌 때마다 더해지므로
+      합계를 쓰면 150k 짜리를 두 번 돌았을 때 300k 로 세어져, 어느 요청도
+      넘지 않았는데 턴 전체가 비싼 단가로 계산된다. 그래서 `meter` 가 제일 큰
+      **한 요청**을 따로 들고 있는다.
+    """
+    price = PRICES.get(turn.model)
+    if price is None:
+        return None
+    over = price.threshold and turn.extra.get("max_prompt_tokens", 0) > price.threshold
+    inp = price.inp_hi if over else price.inp
+    out = price.out_hi if over else price.out
+    cached = price.cache_hi if over else price.cache
+    return (
+        # 캐시 쓰기는 Gemini 가 토큰당 값을 안 매긴다. 값이 들어오면 입력으로 친다.
+        (turn.input_tokens + turn.cache_write_tokens) * inp
+        + turn.cached_tokens * cached
+        + turn.output_tokens * out
+    ) / 1e6
+
+
+def meter(turn, response) -> None:
+    """값 문턱에 쓸 **한 요청의** 프롬프트 크기. 제일 큰 것을 들고 있는다.
+
+    캐시로 읽은 것도 프롬프트 크기에는 들어가므로 캐시가 먹었다고 문턱 아래로
+    내려가지 않지만, 도구를 여러 번 돈다고 넘어가지도 않는다.
+    """
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return
+    one = (
+        (getattr(usage, "input_tokens", 0) or 0)
+        + (getattr(usage, "cache_read_input_tokens", 0) or 0)
+        + (getattr(usage, "cache_creation_input_tokens", 0) or 0)
+    )
+    turn.extra["max_prompt_tokens"] = max(turn.extra.get("max_prompt_tokens", 0), one)
+
+
+# 도구를 부르는 대신 글로 흉내 낸 것.
+#
+# Gemini 가 가끔 도구를 **안 부르고** 그 호출을 글로 적어서 뱉는다(`✨tool_code`
+# 다음 줄에 `print(...)`). 사용자 화면에는 결과 대신 그 코드가 뜬다.
+# ★ **스스로 굳는다** — 저 글이 그 에이전트 말로 기억에 남고 다음 턴 작업 기억에
+#   실려서 모델이 "여기서는 이렇게 쓰는구나" 로 읽는다. 그래서 나가는 자리와 옛
+#   말을 다시 싣는 자리 **두 군데**를 막아야 한다.
+# 적힌 대로 **실행하지 않는다** — 모델이 쓴 코드가 그대로 도는 자리를 만드는 건
+# 다른 종류의 위험이다. 흉내 낸 대목만 지우고 나머지 말은 그대로 내보낸다.
+_TOOL_CODE = re.compile(r"[\s\u2728]*`{0,3}\s*tool_code\b.*?(?:```|\Z)", re.S)
+
+
+def drop_tool_code(text: str) -> str:
+    """도구 호출을 흉내 낸 대목을 걷어낸 글."""
+    return _TOOL_CODE.sub("", text or "").strip()
+
+
+def sanitize_tool_code(said: str) -> tuple[str, list[str]]:
+    """`Policy.sanitizers` 자리. 안 한 일을 한 것처럼 보이게 하는 대목을 건다."""
+    out = drop_tool_code(said)
+    return out, ([] if out == said else ["도구를 글로 흉내 낸 대목"])
+
+
+def blocks_beside(out: dict, tool_use_id: str) -> list[dict]:
+    """도구 결과에 실려 온 그림을 결과 **옆에** 나란히 놓는다.
+
+    안에 넣으면 Gemini 가 못 받는다 — `function_response.response` 는 글만
+    받는다(`to_contents`). 어댑터 사정이라 골격이 안 정한다.
+
+    같은 턴에 실어 주는 이유: 자기가 만든 그림을 못 보면 마음에 드는지 판단할
+    수가 없다.
+    """
+    images = out.pop("_images", None) if isinstance(out, dict) else None
+    return [
+        {
+            "type": "tool_result",
+            "tool_use_id": tool_use_id,
+            "content": json.dumps(out, ensure_ascii=False),
+        },
+        *({"type": "media", "mime": mime, "data": raw} for raw, mime in (images or [])),
+    ]

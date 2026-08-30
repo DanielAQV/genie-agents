@@ -93,6 +93,24 @@ def _policy(raw: dict) -> Policy:
     return Policy(**got)
 
 
+# 각 절이 아는 칸. **모르는 칸은 걸린다** — `timezon` 하나 잘못 적으면 조용히
+# UTC 로 돌고, 그건 몇 주 뒤 시간이 이상한 걸로 발견된다.
+_SECTIONS = {
+    "agent": {"id", "prefix", "adapter", "model", "timezone", "utc_offset"},
+    "prompt": {"instructions", "identity"},
+    "tools": {"module", "gated"},
+}
+
+
+def _only(raw: dict, allowed: set[str], section: str) -> None:
+    unknown = set(raw) - allowed
+    if unknown:
+        raise BadSpec(
+            f"[{section}] 이 모르는 칸이다: {sorted(unknown)} "
+            f"(아는 것: {', '.join(sorted(allowed))})"
+        )
+
+
 def load(root: Path | str) -> Spec:
     """폴더 하나를 읽는다. 어긋난 곳은 **여기서** 걸린다."""
     root = Path(root)
@@ -103,6 +121,9 @@ def load(root: Path | str) -> Spec:
         raw = tomllib.loads(f.read_text(encoding="utf-8"))
     except tomllib.TOMLDecodeError as e:
         raise BadSpec(f"{FILE} 을 못 읽었다: {e}") from None
+
+    for section, allowed in _SECTIONS.items():
+        _only(raw.get(section) or {}, allowed, section)
 
     a = raw.get("agent") or {}
     ident = str(a.get("id") or "").strip()

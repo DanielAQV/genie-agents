@@ -271,3 +271,9 @@ def test_만든_틀은_그대로_읽힌다(clean, tmp_path):
     assert s.id == "warden" and s.adapter == "anthropic"
     agent = runner.Agent(s, client=FakeClient(Resp([Text("예.")])))
     assert agent.run("있나").text == "예."
+
+
+def test_모르는_칸은_절마다_걸린다(tmp_path):
+    """`timezon` 하나 잘못 적으면 조용히 UTC 로 돈다. 몇 주 뒤에 발견된다."""
+    with pytest.raises(BadSpec, match=r"\[agent\] 이 모르는 칸"):
+        load(folder(tmp_path, TOML.replace("timezone =", "timezon =")))
