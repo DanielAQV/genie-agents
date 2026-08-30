@@ -34,7 +34,23 @@ from dataclasses import dataclass
 # ── 계약이 못박은 시그니처 (`계약 문서` 2절) ────────────────
 # 여기 있는 것은 협의로 정해진 것이라 구현이 따라가야 한다. 바꾸려면 계약을
 # 먼저 고쳐야 하고, 그건 사람이 하는 일이다.
+# ── 골격이 이름을 아는 도구 ──────────────────────────────────────────
+# 골격 자체는 도구를 하나도 안 준다. 다만 **원칙 계층**(talent · gate)을 쓰면
+# 그 도구 셋의 시그니처는 여기서 못박는다 — 잔고 게이트가 무엇을 막는지가
+# 도구 이름에 걸려 있어서, 인자가 갈리면 게이트가 갈린다.
+#
+# 실물 두 에이전트에게 물어서 정한 모양이다(2026-08-30). 한쪽은 원래 다른
+# 모양이었는데 본인이 맞추기로 했다 — "인자가 없어서 못 하는 게 아니라 내가
+# 그렇게 하기로 정한 것이었다. 인자가 생겼다고 그 원칙이 흔들리는 건 아니다."
+PRINCIPLE_TOOLS: dict[str, tuple[str, ...]] = {
+    "principle_record": ("agent_id", "principle", "tentative"),
+    "principle_revise": ("agent_id", "principle_id", "new_value", "reason"),
+    "principle_verify": ("agent_id", "principle_id"),
+}
+
 # 쓰는 쪽이 채운다. 협의로 못박은 시그니처가 있으면 여기 적고, 구현이 따라간다.
+#
+#     TC.CANON.update(TC.PRINCIPLE_TOOLS)      원칙 계층을 쓴다면
 #
 #     from genie_agents import toolcontract as TC
 #     TC.CANON["principle_record"] = ("agent_id", "principle", "tentative")
