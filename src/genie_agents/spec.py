@@ -49,6 +49,10 @@ class Spec:
     policy: Policy
     gated: tuple[str, ...]
     tools_module: str
+    enabled: tuple[str, ...] = field(default_factory=tuple)
+    """골격 도구 중 켠 것. `genie_agents.kit.CATALOG` 의 이름들."""
+    describe: dict = field(default_factory=dict)
+    """설명문을 갈아 끼운 것. **말투가 곧 인격이라** 그 존재가 정한다."""
     cast: dict | None = field(default=None)
 
     @property
@@ -98,7 +102,7 @@ def _policy(raw: dict) -> Policy:
 _SECTIONS = {
     "agent": {"id", "prefix", "adapter", "model", "timezone", "utc_offset"},
     "prompt": {"instructions", "identity"},
-    "tools": {"module", "gated"},
+    "tools": {"module", "gated", "enable", "describe"},
 }
 
 
@@ -161,6 +165,8 @@ def load(root: Path | str) -> Spec:
         policy=_policy(raw.get("policy") or {}),
         gated=tuple(t.get("gated") or ()),
         tools_module=str(t.get("module") or ""),
+        enabled=tuple(t.get("enable") or ()),
+        describe=dict(t.get("describe") or {}),
         cast=cast,
     )
 
@@ -180,9 +186,17 @@ timezone = "Asia/Seoul"
 instructions = "prompt.md"   # 지침 — 구조로 강제할 수 없는 것만 적는다
 identity     = "identity.md" # 정체성 — 이 존재가 누구인지 (없어도 된다)
 
+# 할 수 있는 일. **골격 것을 켜든지, 자기 것을 들고 오든지 — 하나만 고른다.**
+# 섞으면 같은 이름이 둘일 때 어느 쪽이 도는지 코드를 읽어야 안다.
 [tools]
-module = "tools.py"          # 이 폴더의 파이썬. 없으면 도구 없이 돈다
-# gated = ["principle_revise"]   # 잔고가 마르면 목록에서 빠지는 도구
+enable = ["reminder_set", "reminder_done", "reminder_list", "note_write", "note_recall"]
+# module = "tools.py"        # 대신 자기 파이썬을 쓸 때. 둘 다 없으면 말만 한다
+# gated  = ["..."]           # 잔고가 마르면 목록에서 빠지는 도구
+
+# 설명문은 모델이 자기 자신에게 읽는 글이라 **말투가 곧 인격**이다.
+# 무엇을 하는가는 골격이 정하고, 어떻게 설명되는가는 여기서 정한다.
+# [tools.describe]
+# note_write = "적어 둘 것. 짧게."
 
 # 루프가 갈리는 자리. 안 적으면 다른 에이전트와 똑같이 작동한다.
 [policy]

@@ -29,6 +29,7 @@ from typing import Any
 from . import clock, env, loop
 from .loop import Turn
 from .spec import BadSpec, Spec, load
+from .tools import MissingContext, UnknownTool
 
 
 class NoTools:
@@ -39,6 +40,33 @@ class NoTools:
 
     def call(self, name: str, **args: Any) -> dict:
         return {"error": f"이 에이전트에는 도구가 없다: {name}"}
+
+
+class KitSession:
+    """`agent.toml` 에서 이름으로 켠 것만 내놓는다.
+
+    상태(리마인더·메모·바깥 소식)는 이 에이전트 자리에 앉는다. 도구가
+    무엇을 요구하는지는 도구가 스스로 적어 두고(`Tool.needs`), 못 채우면
+    **켤 때** 죽는다 — 부를 때 죽으면 그 턴이 통째로 날아간다.
+    """
+
+    def __init__(self, spec: Spec) -> None:
+        from . import notes as _notes, reminders as _reminders, world as _world
+        from .kit import CATALOG
+        from .tools import Toolbox
+
+        root = spec.state_root
+        self.reminders = _reminders.ReminderStore(root)
+        self.notes = _notes.NoteStore(root)
+        self.world = _world.WorldFeed(root)
+        self.box = Toolbox(CATALOG, spec.enabled, describe=spec.describe)
+        self.box.bind(self)
+
+    def tools(self, scope: str) -> list[dict]:
+        return self.box.specs(scope)
+
+    def call(self, name: str, **args: Any) -> dict:
+        return self.box.call(self, name, **args)
 
 
 def _load_module(path: Path, name: str):
@@ -135,6 +163,14 @@ def _session_for(spec: Spec):
     `Session` 클래스가 있으면 그걸 쓰고, 없으면 모듈에 있는 `tools`/`call`
     함수를 쓴다. 둘 다 없으면 도구 없이 돈다 — 말만 하는 에이전트도 에이전트다.
     """
+    if spec.enabled and spec.tools_module:
+        raise BadSpec(
+            "[tools] 에 enable 과 module 이 같이 있다. 둘 중 하나만 골라라 — "
+            "골격 도구를 켜든지, 자기 도구를 들고 오든지. 섞으면 같은 이름이 "
+            "둘이 될 때 어느 쪽이 도는지 코드를 읽어야 안다"
+        )
+    if spec.enabled:
+        return KitSession(spec)
     if not spec.tools_module:
         return NoTools()
     path = spec.root / spec.tools_module
@@ -160,10 +196,12 @@ def check(root: Path | str) -> list[str]:
     except BadSpec as e:
         return [str(e)]
 
-    if spec.tools_module:
+    if spec.tools_module or spec.enabled:
         try:
             _session_for(spec)
-        except BadSpec as e:
+        except (BadSpec, UnknownTool, MissingContext) as e:
+            # 우리가 낸 말이다. 그대로 보여 준다 — 덧씌우면 무엇이 문제인지
+            # 적어 둔 안내가 예외 이름 뒤로 숨는다.
             problems.append(str(e))
         except Exception as e:  # noqa: BLE001 — 남의 코드다. 무엇이든 알려준다
             problems.append(f"도구를 읽다 죽었다: {type(e).__name__}: {e}")

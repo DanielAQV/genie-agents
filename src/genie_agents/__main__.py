@@ -43,19 +43,8 @@ def cmd_new(args) -> int:
         "여기 적힌 것이 정본이다. 지침과 부딪히면 이쪽이 이긴다.\n",
         encoding="utf-8",
     )
-    (root / "tools.py").write_text(
-        '"""이 에이전트가 할 수 있는 일.\n\n'
-        "루프가 요구하는 것은 둘뿐이다 — `tools(scope)` 와 `call(name, **args)`.\n"
-        '"""\n\n\n'
-        "def tools(scope: str) -> list[dict]:\n"
-        '    """지금 이 자리에서 모델에게 보일 도구. **매 요청 물어본다.**"""\n'
-        "    return []\n\n\n"
-        "def call(name: str, **args):\n"
-        '    """막혔으면 `{"blocked": 이유}` 를 돌려준다 — 예외로 던지면\n'
-        '    판단 루프가 거기서 끊긴다."""\n'
-        '    return {"error": f"모르는 도구다: {name}"}\n',
-        encoding="utf-8",
-    )
+    # `tools.py` 는 안 만든다. 틀은 골격 도구를 켜는 쪽으로 나가고,
+    # 안 쓰는 빈 파일이 있으면 그게 도는 자리인 줄 알고 거기를 고친다.
     print(f"만들었다: {root}")
     for f in sorted(p.name for p in root.iterdir()):
         print(f"  {f}")
@@ -77,6 +66,14 @@ def cmd_check(args) -> int:
     print(f"  상태 자리   {spec.state_root}")
     print(f"  지침        {len(spec.instructions):,}자"
           + (f" · 정체성 {len(spec.identity):,}자" if spec.identity else ""))
+    if spec.enabled:
+        print(f"  도구        {len(spec.enabled)}개 — {', '.join(spec.enabled)}")
+        if spec.describe:
+            print(f"              설명을 갈아 끼운 것: {', '.join(sorted(spec.describe))}")
+    elif spec.tools_module:
+        print(f"  도구        {spec.tools_module} (직접 들고 온 것)")
+    else:
+        print("  도구        없다 — 말만 한다")
     if spec.cast:
         print(f"  배역        방 {len(spec.cast['rooms'])}개")
 
