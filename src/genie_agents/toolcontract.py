@@ -39,11 +39,14 @@ from dataclasses import dataclass
 # 그 도구 셋의 시그니처는 여기서 못박는다 — 잔고 게이트가 무엇을 막는지가
 # 도구 이름에 걸려 있어서, 인자가 갈리면 게이트가 갈린다.
 #
+# `reason` 은 **왜 그 원칙을 세우는지**다. 고치는 데(`principle_revise`)는 근거를
+# 강제하면서 세우는 데는 안 받는 모양이었고, 그건 빠뜨린 것이었다.
+#
 # 실물 두 에이전트에게 물어서 정한 모양이다(2026-08-30). 한쪽은 원래 다른
 # 모양이었는데 본인이 맞추기로 했다 — "인자가 없어서 못 하는 게 아니라 내가
 # 그렇게 하기로 정한 것이었다. 인자가 생겼다고 그 원칙이 흔들리는 건 아니다."
 PRINCIPLE_TOOLS: dict[str, tuple[str, ...]] = {
-    "principle_record": ("agent_id", "principle", "tentative"),
+    "principle_record": ("agent_id", "principle", "tentative", "reason"),
     "principle_revise": ("agent_id", "principle_id", "new_value", "reason"),
     "principle_verify": ("agent_id", "principle_id"),
 }

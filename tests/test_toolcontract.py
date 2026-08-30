@@ -55,7 +55,7 @@ def test_못박은_시그니처를_어기면_걸린다(monkeypatch):
     어긴_것 = TC.check_canon([spec("principle_record", "text", "reason")])
     assert [d.tool for d in 어긴_것] == ["principle_record"]
     assert not TC.check_canon(
-        [spec("principle_record", "agent_id", "principle", "tentative")]
+        [spec("principle_record", *TC.PRINCIPLE_TOOLS["principle_record"])]
     )
 
 
