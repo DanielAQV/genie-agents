@@ -116,6 +116,24 @@ class Policy:
     있고, 적어 두지 않으면 다음 턴에 사라진다). 한 번만 걸리고 풀린다.
     """
 
+    result_blocks: Callable[["object", str], "list[dict]"] | None = None
+    """도구 결과를 블록들로 만드는 손. `(out, tool_use_id) → [블록…]`.
+
+    **어디에 무엇을 두는지는 어댑터 사정이다.** 글이 아닌 것(그림 같은)을 도구
+    결과 안에 넣을 수 있는 모델이 있고, 도구 결과가 글만 받아서 옆에 나란히
+    놓아야 하는 모델이 있다. 골격이 한쪽을 고르면 다른 쪽이 조용히 깨진다.
+
+    안 주면 글 하나로 만든다(`loop.result_blocks`).
+    """
+
+    meter: Callable[["object", "object"], None] | None = None
+    """값을 더 세는 손. `(turn, response) → None`.
+
+    표준 넷(입력·캐시읽기·캐시쓰기·출력)은 골격이 센다. 그 밖은 모델마다
+    다르다 — 캐시 TTL 단가, 서버 도구 횟수, 프롬프트 크기 문턱. **골격이 그
+    이름을 알면 그 모델 것이 되어 버리므로** 여기서 받아 `turn.extra` 에 담는다.
+    """
+
     extra: dict = field(default_factory=dict)
     """모델에 그대로 넘길 것. 어댑터가 모르는 키는 무시한다."""
 

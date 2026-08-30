@@ -71,6 +71,10 @@ class Turn:
     requests: int = 0
     seconds: float = 0.0
     dropped: list[str] = field(default_factory=list)
+    extra: dict = field(default_factory=dict)
+    """모델이나 쓰는 쪽만 아는 값. 캐시 TTL 단가, 서버 도구 횟수 같은 것들이
+    여기 들어간다 — 골격이 그 이름을 알면 그 모델 것이 되어 버린다.
+    채우는 것은 `Policy.meter` 다."""
 
     @property
     def cache_hit_ratio(self) -> float:
@@ -103,7 +107,8 @@ def move_cache_edge(messages: list[dict], previous: dict | None, ttl: str = "5m"
     return None
 
 
-def _count(turn: Turn, response: Any) -> None:
+def _count(turn: Turn, response: Any, meter=None) -> None:
+    """표준 넷을 센다. 그 밖은 `meter` 가 `turn.extra` 에 담는다."""
     usage = getattr(response, "usage", None)
     if usage is None:
         return
@@ -111,6 +116,8 @@ def _count(turn: Turn, response: Any) -> None:
     turn.cached_tokens += getattr(usage, "cache_read_input_tokens", 0) or 0
     turn.cache_write_tokens += getattr(usage, "cache_creation_input_tokens", 0) or 0
     turn.output_tokens += getattr(usage, "output_tokens", 0) or 0
+    if meter is not None:
+        meter(turn, response)
 
 
 def _clean(said: str, policy: Policy, turn: Turn) -> str:
@@ -124,17 +131,21 @@ def _clean(said: str, policy: Policy, turn: Turn) -> str:
     return said
 
 
-def _tool_result(out: Any) -> Any:
-    """도구가 낸 것을 모델이 읽는 모양으로.
+def result_blocks(out: Any, tool_use_id: str) -> list[dict]:
+    """도구가 낸 것을 모델이 읽는 블록들로. **기본은 글 하나다.**
 
-    `_blocks` 가 있으면 그림처럼 글이 아닌 것이 섞인 것이다. 어댑터가 모르면
-    그쪽에서 떨어진다.
+    ★ 그림처럼 글이 아닌 것을 어디에 두는지는 **어댑터 사정**이라 골격이 안
+      정한다. 어떤 모델은 도구 결과 블록 안에 넣을 수 있고, 어떤 모델은 도구
+      결과가 글만 받아서 **옆에 나란히** 놓아야 한다. 그때는
+      `Policy.result_blocks` 로 갈아끼운다.
     """
-    if isinstance(out, dict) and "_blocks" in out:
-        out = dict(out)
-        blocks = out.pop("_blocks")
-        return [*blocks, {"type": "text", "text": json.dumps(out, ensure_ascii=False, default=str)}]
-    return json.dumps(out, ensure_ascii=False, default=str)
+    return [
+        {
+            "type": "tool_result",
+            "tool_use_id": tool_use_id,
+            "content": json.dumps(out, ensure_ascii=False, default=str),
+        }
+    ]
 
 
 def run(
@@ -146,9 +157,15 @@ def run(
     system: Any = None,
     scope: str = "",
     policy: Policy = DEFAULT,
+    turn: Turn | None = None,
 ) -> Turn:
-    """한 번 돈다. `messages` 는 **제자리에서 자란다** — 부른 쪽이 이어서 쓸 수 있게."""
-    turn = Turn(model=model)
+    """한 번 돈다. `messages` 는 **제자리에서 자란다** — 부른 쪽이 이어서 쓸 수 있게.
+
+    `turn` 을 주면 그걸 채운다. 값 계산처럼 **모델마다 다른 것**을 얹은 하위
+    클래스를 쓰는 자리다 — 골격이 그걸 알 필요는 없고, 알면 그 모델 것이 된다.
+    """
+    turn = turn if turn is not None else Turn()
+    turn.model = model
     started = time.monotonic()
     edge: dict | None = None
     pauses = 0
@@ -175,7 +192,7 @@ def run(
         )
         turn.requests += 1
         turn.stop_reason = getattr(response, "stop_reason", "") or ""
-        _count(turn, response)
+        _count(turn, response, policy.meter)
 
         chunks = [
             b.text for b in response.content
@@ -218,9 +235,8 @@ def run(
                     turn.blocked.append(block.name)
                 elif block.name in policy.decision_tools:
                     turn.decided = True
-                results.append(
-                    {"type": "tool_result", "tool_use_id": block.id, "content": _tool_result(out)}
-                )
+                shape = policy.result_blocks or result_blocks
+                results.extend(shape(out, block.id))
             except Exception as e:  # noqa: BLE001 — 결과를 보고 판단하게 둔다
                 results.append(
                     {
