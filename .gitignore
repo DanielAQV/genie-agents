@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+venv/
+.venv/
+.env
+# 상태 디렉토리. 프리픽스마다 다르다(.alpha/ .beta/ …) — 무엇이 되든 안 올린다.
+.*/
+!.gitignore
+!.github/

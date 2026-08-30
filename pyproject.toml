@@ -1,0 +1,27 @@
+[project]
+name = "genie-agents"
+version = "0.1.0"
+description = "에이전트 골격 — 저장·시간·잔고·게이트·도구 계약. 인격은 여기 없다"
+requires-python = ">=3.11"
+dependencies = [
+    "tzdata; sys_platform == 'win32'",  # 윈도우엔 tz 데이터베이스가 없다
+]
+
+# ★ 모델 SDK 를 여기 두지 않는다. 어느 모델을 쓸지는 그 에이전트가 누구인지에
+#   딸린 것이라, 여기 두면 안 쓰는 SDK 까지 짊어진다. 어댑터가 늦게 import 한다.
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.40"]
+gemini = ["google-genai>=1.0"]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
