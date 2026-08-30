@@ -59,8 +59,11 @@ class Failures:
         if self.read():
             self._store.save({})
 
-    def line(self) -> str:
+    def line(self, who: str = "상대") -> str:
         """브리핑에 실릴 한 줄. 아무것도 못 나간 게 없으면 빈 문자열.
+
+        `who` 는 **못 닿은 사람**이다. 부르는 쪽이 준다 — 골격은 등장인물을
+        모른다.
 
         **무엇을 못 보냈는지는 안 싣는다.** 그건 이미 기억에 있고(말하기로 한
         판단은 일어난 사실이라 그대로 남는다), 여기서 또 실으면 같은 말이 두 번
@@ -75,7 +78,7 @@ class Failures:
             span += f" {clock.stamp(last)}까지"
         n = got["count"]
         return (
-            f"네 말이 {who} 에게 안 닿고 있다 — {span} {n}번. "
+            f"네 말이 {who}에게 안 닿고 있다 — {span} {n}번. "
             f"({got.get('why', '이유 모름')}) "
             f"지금 {who} 쪽 화면에는 그 말들이 없다."
         )
