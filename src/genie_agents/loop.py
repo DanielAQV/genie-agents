@@ -215,7 +215,14 @@ def run(
             #   일어났는지 알려주면 이번엔 도구를 부를 수도 있다.
             if said and len(turn.dropped) > before and policy.retry_note and not retried:
                 retried = True
-                print("  (걷어낸 이유를 알려주고 한 번 다시 묻는다)", file=sys.stderr)
+                # ★ **다시 묻기만 하면 또 안 부를 수 있다.** 그러면 "보낼게" 를
+                #   두 번 하고 두 번 안 온 것이 된다. 무엇이 걷혔는지 보고 그에
+                #   맞는 도구를 강제한다 — 이미 보낸다고 말한 자리라, 지어냈으면
+                #   진짜로 보내는 쪽이 맞다.
+                if policy.retry_force:
+                    force = policy.retry_force(turn.dropped[before:]) or ""
+                print("  (걷어낸 이유를 알려주고 한 번 다시 묻는다"
+                      + (f" — {force} 를 강제한다)" if force else ")"), file=sys.stderr)
                 messages.append({"role": "assistant", "content": response.content})
                 messages.append({"role": "user", "content": policy.retry_note})
                 continue

@@ -280,3 +280,64 @@ def test_값은_여기서_안_센다():
                  [{"role": "user", "content": "야"}], model="m")
     assert t.input_tokens == 10 and t.output_tokens == 5
     assert not hasattr(t, "cost")
+
+
+def test_다시_물을_때_도구를_강제할_수_있다():
+    """★ 다시 묻기만 하면 또 안 부를 수 있다.
+
+    그러면 "보낼게" 를 두 번 하고 두 번 안 온 것이 된다. 실제로 그랬다 —
+    2026-08-31, 예나가 `[음성:...]` 을 지어냈고, 걷어내고 다시 물었더니
+    이번엔 사과만 하고 도구는 또 안 불렀다.
+
+    **이미 보낸다고 말한 자리다.** 지어냈으면 진짜로 보내는 쪽이 맞다.
+    """
+    def 표시만(s):
+        return s.replace("[음성:xyz]", "").strip(), (["[음성:xyz]"] if "[음성:xyz]" in s else [])
+
+    c = FakeClient(Resp([Text("들려줄게! [음성:xyz]")]), Resp([Text("응 알았어")]))
+    loop.run(
+        c, FakeSession(), [{"role": "user", "content": "들려줘"}], model="m",
+        policy=Policy(
+            sanitizers=(표시만,),
+            retry_note="[자리] 걷어냈다",
+            retry_force=lambda 걷힌: "voice_reply" if any("음성" in d for d in 걷힌) else "",
+        ),
+    )
+
+    assert c.seen[0].get("tool_choice") is None, "첫 요청엔 강제가 없다"
+    assert c.seen[1]["tool_choice"] == {"type": "tool", "name": "voice_reply"}
+
+
+def test_걷힌_것에_맞는_도구만_강제한다():
+    """사진을 지어냈는데 소리를 강제하면 엉뚱한 것이 나간다."""
+    def 표시만(s):
+        return s.replace("[사진:z]", "").strip(), (["[사진:z]"] if "[사진:z]" in s else [])
+
+    골라진 = []
+
+    def 고른다(걷힌):
+        골라진.append(list(걷힌))
+        return "self_portrait" if any("사진" in d for d in 걷힌) else "voice_reply"
+
+    c = FakeClient(Resp([Text("보여줄게 [사진:z]")]), Resp([Text("응")]))
+    loop.run(
+        c, FakeSession(), [{"role": "user", "content": "보여줘"}], model="m",
+        policy=Policy(sanitizers=(표시만,), retry_note="[자리] 걷어냈다", retry_force=고른다),
+    )
+
+    assert 골라진 == [["[사진:z]"]], "이번에 걷힌 것만 넘긴다"
+    assert c.seen[1]["tool_choice"]["name"] == "self_portrait"
+
+
+def test_강제를_안_정하면_다시_묻기만_한다():
+    """기본은 안 거는 것이다. 늘 강제하면 "안 보낼 생각이었다" 를 못 고른다."""
+    def 표시만(s):
+        return s.replace("[사진:z]", "").strip(), (["[사진:z]"] if "[사진:z]" in s else [])
+
+    c = FakeClient(Resp([Text("보낼게 [사진:z]")]), Resp([Text("응")]))
+    loop.run(
+        c, FakeSession(), [{"role": "user", "content": "보여줘"}], model="m",
+        policy=Policy(sanitizers=(표시만,), retry_note="[자리] 걷어냈다"),
+    )
+
+    assert [k.get("tool_choice") for k in c.seen] == [None, None]

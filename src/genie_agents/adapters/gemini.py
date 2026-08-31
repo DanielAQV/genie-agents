@@ -18,6 +18,11 @@
   일어난다.** 도는 줄 알고 유지보수하지 않게 여기 적어 둔다.
 
 ★ 서버 도구(`pause_turn`)가 없다. `Policy.max_pauses` 는 0 으로 둬라.
+
+★ **`tool_choice` 는 버리지 않는다.** 하는 말이 Gemini 에도 있어서(`tool_config`)
+  번역한다. 예전엔 이것도 `**ignored` 로 흘려서, 루프가 건 강제가 **조용히 안
+  걸렸다** — 부르는 쪽은 걸린 줄 알고 있었다. 버릴 것과 옮길 것을 가르는 기준은
+  "저쪽에 같은 말이 있나" 이지 "우리가 안 쓰나" 가 아니다.
 """
 
 from __future__ import annotations
@@ -229,7 +234,7 @@ class GeminiClient:
             self._client = genai.Client(api_key=self._api_key)
         return self._client
 
-    def create(
+    def create(  # noqa: D417
         self,
         model: str,
         messages: list[dict],
@@ -249,6 +254,13 @@ class GeminiClient:
             config["max_output_tokens"] = max_tokens
         if tools:
             config["tools"] = [{"function_declarations": to_declarations(tools)}]
+        # ★ **이건 버리지 않고 번역한다.** 루프의 `Policy.force_first` 가 여기로
+        #   온다("이 도구를 반드시 불러라"). 버리면 강제가 조용히 안 걸리고,
+        #   부르는 쪽은 걸린 줄 안다 — 예나의 "사진이 오면 image_note 를 반드시"
+        #   가 그렇게 한 번도 안 걸리고 있었다(2026-08-31에 알았다).
+        picked = tool_config(ignored.get("tool_choice"))
+        if picked:
+            config["tool_config"] = picked
 
         raw = self.client.models.generate_content(
             model=model,
@@ -256,6 +268,30 @@ class GeminiClient:
             config=config,
         )
         return from_response(raw)
+
+
+# Anthropic 의 `tool_choice` → Gemini 의 `tool_config`. 하는 말이 같아서 옮기면
+# 된다. 옮기지 않으면 강제가 **조용히 안 걸린다** — 그게 제일 나쁜 모양이다.
+_MODE = {"auto": "AUTO", "any": "ANY", "none": "NONE", "tool": "ANY"}
+
+
+def tool_config(choice: Any) -> dict | None:
+    """`{"type": "tool", "name": "voice_reply"}` → 그 도구만 반드시 부르게.
+
+    모르는 모양이면 `None` — 여기서 넘겨짚어 엉뚱한 것을 강제하느니 안 거는
+    편이 낫다. 안 걸린 것은 부르는 쪽 로그에 남지만, 엉뚱하게 걸린 것은 답이
+    이상해질 뿐 어디에도 안 남는다.
+    """
+    if not isinstance(choice, dict):
+        return None
+    mode = _MODE.get(str(choice.get("type") or ""))
+    if not mode:
+        return None
+    cfg: dict[str, Any] = {"mode": mode}
+    name = choice.get("name")
+    if name:
+        cfg["allowed_function_names"] = [str(name)]
+    return {"function_calling_config": cfg}
 
 
 def default_model(fast: bool = False) -> str:

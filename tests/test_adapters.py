@@ -68,6 +68,39 @@ def test_어댑터가_무엇을_버리는지_적혀_있다():
     머리 = src[: src.index('"""', src.index('"""') + 3)]
     assert "cache_control" in 머리 and "무시" in 머리
     assert "move_cache_edge" in 머리, "정책 이름으로 적어야 찾는다"
+    # 버리는 것만 적으면 "그럼 나머지는 다 도나" 로 읽는다.
+    assert "tool_choice" in 머리, "옮기는 것도 적어야 한다"
+
+
+def test_강제_호출은_버리지_않고_옮긴다():
+    """★ 이게 조용히 안 걸리고 있었다.
+
+    루프의 `Policy.force_first` 는 `tool_choice` 로 온다. Gemini 어댑터가 그걸
+    `**ignored` 로 흘려버려서, 예나의 "사진이 오면 image_note 를 반드시 불러라"
+    가 **한 번도 안 걸렸다**(2026-08-31에 알았다). 부르는 쪽은 걸린 줄 알았다.
+
+    버릴 것과 옮길 것을 가르는 기준은 "저쪽에 같은 말이 있나" 이지 "우리가 안
+    쓰나" 가 아니다. Gemini 에는 `tool_config` 가 있다.
+    """
+    from genie_agents.adapters.gemini import tool_config
+
+    cfg = tool_config({"type": "tool", "name": "voice_reply"})["function_calling_config"]
+    assert cfg["mode"] == "ANY"
+    assert cfg["allowed_function_names"] == ["voice_reply"]
+
+    # 이름 없이 "아무거나 하나는 불러라"
+    assert tool_config({"type": "any"})["function_calling_config"] == {"mode": "ANY"}
+    assert tool_config({"type": "auto"})["function_calling_config"]["mode"] == "AUTO"
+
+
+def test_모르는_모양이면_아예_안_건다():
+    """넘겨짚어 엉뚱한 것을 강제하느니 안 거는 편이 낫다 — 안 걸린 것은
+    로그에 남지만, 엉뚱하게 걸린 것은 답만 이상해지고 어디에도 안 남는다."""
+    from genie_agents.adapters.gemini import tool_config
+
+    assert tool_config(None) is None
+    assert tool_config("voice_reply") is None
+    assert tool_config({"type": "처음보는것"}) is None
 
 
 def test_루프는_어느_클라이언트든_받는다():
