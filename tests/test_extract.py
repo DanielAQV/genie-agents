@@ -221,13 +221,14 @@ def test_닫는_것이_여는_것보다_먼저다(book, loops, frozen):
     lp = loops.open("#42 본다", source="slack:C01:1756000000.000000")
     x = line(5, "#42 다 봤어", who=ME)
     book.put(x)
+    from genie_agents.extract import Move
+
     got = Extraction(
-        moves=[__import__("genie_agents.extract", fromlist=["Move"]).Move(
-            id=lp.id, state=DONE, note="본인이 '다 봤어'")],
-        opens=[Open(text="새것", source=x.key, sure=True)],
+        moves=[Move(id=lp.id, state=DONE, note="본인이 '다 봤어'", source=x.key)],
+        opens=[Open(text="아주 다른 새 일거리", source=x.key, sure=True)],
     )
     셈 = apply(got, loops, book)
-    assert 셈 == {"움직임": 1, "열림": 1, "못 씀": 0}
+    assert 셈 == {"움직임": 1, "열림": 1, "못 씀": 0, "겹침": 0}
     assert loops.get(lp.id).state == DONE
 
 
@@ -299,3 +300,128 @@ def test_추출은_도구를_안_넘긴다():
     assert out == '{"opens": []}'
     assert "tools" not in 본것
     assert 본것["system"] == "지침"
+
+
+# ── 근거 없이는 안 닫는다 ──────────────────────────────────────────
+def test_근거_없이_닫으려_하면_안_닫는다(book, loops, frozen):
+    """★ 실측에서 모델이 이렇게 닫았다 — *"본인이 '다 확인했어'를 말하지
+    않았으나, 전반적으로 완료된 것으로 판단됨."* 닫는 말이 없는데 닫은 것이다.
+
+    잘못 닫으면 그 고리는 목록에서 **조용히 사라진다.** 안 닫힌 고리는 목록에
+    남아서 사람이 지울 수 있지만, 잘못 닫힌 고리는 사람이 볼 기회 자체가 없다.
+    두 실패의 값이 대칭이 아니다."""
+    from genie_agents.extract import Move
+
+    lp = loops.open("본다", source="slack:C01:1756000000.000000")
+    셈 = apply(Extraction(moves=[Move(id=lp.id, state=DONE, note="느낌상 끝났다")]),
+             loops, book)
+    assert 셈["못 씀"] == 1
+    assert loops.get(lp.id).state == OPEN
+
+
+def test_묶음에_없는_근거로는_못_닫는다(book, loops, frozen):
+    """모델은 그 묶음만 봤다. 거기 없는 말을 근거로 댔으면 지어낸 것이다."""
+    from genie_agents.extract import Move
+
+    lp = loops.open("본다", source="slack:C01:1756000000.000000")
+    x = line(0, "딴 얘기", who=ME)
+    book.put(x)
+    셈 = apply(Extraction(moves=[Move(id=lp.id, state=DONE, source="slack:C01:없는말")]),
+             loops, book, bundle=bundle(x))
+    assert 셈["못 씀"] == 1 and loops.get(lp.id).state == OPEN
+
+
+def test_근거가_묶음_안에_있으면_닫는다(book, loops, frozen):
+    from genie_agents.extract import Move
+
+    lp = loops.open("본다", source="slack:C01:1756000000.000000")
+    x = line(5, "다 봤어", who=ME)
+    book.put(x)
+    셈 = apply(Extraction(moves=[Move(id=lp.id, state=DONE, source=x.key)]),
+             loops, book, bundle=bundle(x))
+    assert 셈["움직임"] == 1 and loops.get(lp.id).state == DONE
+
+
+def test_그냥_움직이는_것은_근거를_안_묻는다(book, loops, frozen):
+    """상태를 안 닫는 움직임은 되돌릴 수 있다. 문턱을 같게 둘 이유가 없다."""
+    from genie_agents.extract import Move
+
+    lp = loops.open("본다", source="slack:C01:1756000000.000000")
+    assert apply(Extraction(moves=[Move(id=lp.id, note="찔렀다")]), loops, book)["움직임"] == 1
+
+
+# ── 같은 일을 두 번 안 연다 ────────────────────────────────────────
+def test_같은_일이_다른_줄에서_또_나와도_한_고리다(book, loops, frozen):
+    """★ `open()` 은 근거가 같을 때만 막는다. 그런데 실측에서 한 고리가
+    **세 번** 열렸다 — 근거가 다 달라서 막을 수가 없었다."""
+    a, b = line(0, "말1", who=ME), line(9, "말2", who=ME)
+    book.put_many([a, b])
+    apply(Extraction(opens=[Open(text="파트 1: UI 수정 및 사용자 안내 추가", source=a.key)]),
+          loops, book)
+    셈 = apply(Extraction(opens=[Open(text="파트 1: UI 수정 및 사용자 안내 추가", source=b.key)]),
+             loops, book)
+    assert 셈["겹침"] == 1 and 셈["열림"] == 0
+    assert len(loops.live()) == 1
+
+
+def test_겹친_것을_버리지_않고_움직임으로_적는다(book, loops, frozen):
+    """다시 나왔다는 것 자체가 그 고리가 아직 살아 있다는 정보다.
+    안 적으면 조용한 날짜만 보고 찌르게 된다."""
+    a, b = line(0, "말1", who=ME), line(9, "말2", who=ME)
+    book.put_many([a, b])
+    apply(Extraction(opens=[Open(text="figma 리뷰한다", source=a.key)]), loops, book)
+    apply(Extraction(opens=[Open(text="mr Khôi figma 리뷰한다", source=b.key)]), loops, book)
+    lp = loops.live()[0]
+    assert len(lp.moves) == 2 and "또 나왔다" in lp.moves[-1].note
+
+
+def test_다른_일은_안_접는다(book, loops, frozen):
+    """실측 간격: 진짜 중복 0.57~1.00, 남남 0.00~0.07. 사이가 비어 있다."""
+    a, b = line(0, "말1", who=ME), line(9, "말2", who=ME)
+    book.put_many([a, b])
+    apply(Extraction(opens=[Open(text="BE 리뷰 요청", source=a.key)]), loops, book)
+    apply(Extraction(opens=[Open(text="subdomain 블랙리스트 적용", source=b.key)]), loops, book)
+    assert len(loops.live()) == 2
+
+
+def test_닫힌_고리와는_안_겹친다(book, loops, frozen):
+    """`similar` 는 살아 있는 것만 본다 — 닫힌 일이 다시 열리는 것은
+    같은 일이 아니라 **다시 생긴 일**이다."""
+    a, b = line(0, "말1", who=ME), line(9, "말2", who=ME)
+    book.put_many([a, b])
+    apply(Extraction(opens=[Open(text="figma 리뷰한다", source=a.key)]), loops, book)
+    loops.close(loops.live()[0].id)
+    셈 = apply(Extraction(opens=[Open(text="figma 리뷰한다", source=b.key)]), loops, book)
+    assert 셈["열림"] == 1
+
+
+# ── 내 이름이 남으로 안 잡힌다 ─────────────────────────────────────
+def test_남들이_부르는_내_이름도_나다(book, loops, frozen):
+    """★ 실측에서 이게 없어서 본인 일이 남 일로 잡혔다. 팀원들이 본인을
+    "mr Khôi" 라고 부르는데 이름 표에는 id 밖에 없었다. 내 일을 남 일로 세면
+    원장이 **조용히** 틀린다 — 목록에 줄은 그대로 있어서 눈치채기 어렵다."""
+    from genie_agents.extract import me_names
+
+    names = {"U0ME": "Daniel (Khôi)", "U7": "Nghia Tran Quang"}
+    별칭 = me_names(names, "U0ME")
+    x = line(0, "본다", who=ME)
+    book.put(x)
+    apply(Extraction(opens=[Open(text="figma 본다", source=x.key, owner="mr Khôi")]),
+          loops, book, names=names, mine=별칭)
+    assert loops.live()[0].owner == ME
+
+
+def test_날_id_는_이름으로_바뀐다(book, loops, frozen):
+    names = {"U0ME": "Daniel (Khôi)", "U7": "Nghia Tran Quang"}
+    x = line(0, "본다", who=ME)
+    book.put(x)
+    apply(Extraction(opens=[Open(text="BE 본다", source=x.key, owner="U7")]),
+          loops, book, names=names, mine=["U0ME", "Daniel", "Khôi"])
+    assert loops.live()[0].owner == "Nghia Tran Quang"
+
+
+def test_주인이_비면_나다(book, loops, frozen):
+    x = line(0, "본다", who=ME)
+    book.put(x)
+    apply(Extraction(opens=[Open(text="본다", source=x.key, owner="")]), loops, book)
+    assert loops.live()[0].owner == ME

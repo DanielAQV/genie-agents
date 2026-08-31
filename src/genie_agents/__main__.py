@@ -455,6 +455,10 @@ def cmd_extract(args) -> int:
     # ★ **시간 순으로 돈다.** 앞의 대화가 연 고리를 뒤의 대화가 닫는다 —
     #   순서가 뒤집히면 닫는 말을 먼저 보고, 그러면 무엇을 닫는지 모른다.
     묶음.sort(key=lambda b: b.span[0])
+    if args.limit:
+        # 지침을 고치고 다시 돌려 보는 일의 반복이라, 스무 묶음을 다 돌리면
+        # 한 번에 30분이다. 앞 몇 개로 먼저 본다.
+        묶음 = 묶음[: args.limit]
     print(f"  {root} · 묶음 {len(묶음)}개 · 열린 고리 {len(loops.live())}개")
 
     if args.dry_run:
@@ -476,7 +480,8 @@ def cmd_extract(args) -> int:
 
     client = _client_for(spec)
     model = spec.model or _default_model(spec)
-    셈 = {"움직임": 0, "열림": 0, "못 씀": 0}
+    별칭 = ex.me_names(names, me_id)
+    셈 = {"움직임": 0, "열림": 0, "못 씀": 0, "겹침": 0}
     못푼것 = []
     for b in 묶음:
         # ★ **부르기 직전에 싣는다.** 미리 전부 직렬화해 두면 열린 고리 목록이
@@ -486,7 +491,8 @@ def cmd_extract(args) -> int:
         body = ex.serialize(b, loops=loops.live(), names=names, me_id=me_id)
         text = ex.ask(client, model, spec.extract, body)
         got = ex.parse(text)
-        for k, v in ex.apply(got, loops, book).items():
+        for k, v in ex.apply(got, loops, book, bundle=b,
+                             names=names, mine=별칭).items():
             셈[k] += v
         못푼것 += got.unresolved
         머리 = f"{b.room}" + (f"·{b.thread}" if b.thread else "")
@@ -562,6 +568,8 @@ def main(argv: list[str] | None = None) -> int:
     x.add_argument("--root", default="", help="어느 원장에 (기본 <폴더>/.<id>)")
     x.add_argument("--me", default="", help="본인 slack id. 멘션을 알아보려면 필요하다")
     x.add_argument("--names", default="", help="{id: 이름} JSON 파일")
+    x.add_argument("--limit", type=int, default=0,
+                   help="앞 N 묶음만. 지침을 고쳐 가며 볼 때")
     x.add_argument("--dry-run", action="store_true",
                    help="모델을 안 부르고 무엇이 실릴지만 본다")
     x.add_argument("--full", action="store_true", help="--dry-run 에서 본문까지 찍는다")

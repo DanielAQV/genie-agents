@@ -47,9 +47,12 @@ from .base import Response, TextBlock, Usage
 
 DEFAULT_URL = "http://127.0.0.1:8080/v1/chat/completions"
 DEFAULT_MODEL = "로컬-모델"
-TIMEOUT = 300.0
-"""4B 를 6GB 에서 돌리면 한 묶음에 십수 초가 걸린다. 넉넉히 둔다 —
-하루 열 번 안쪽으로 도는 물건이라 기다리는 값이 싸다."""
+TIMEOUT = 900.0
+"""4B 를 6GB 에서 돌리면 한 묶음에 1~2분이 걸린다(실측 2~4 tok/s).
+
+★ 300초였을 때 실제로 한 번 끊겼고, 그 한 번이 **그 판 전체를 죽였다.**
+  하루 열 번 안쪽으로 도는 물건이라 기다리는 값은 거의 0이고, 끊기는 값은
+  그 판 전체다. 값이 대칭이 아니면 넉넉한 쪽으로 둔다."""
 
 
 class LocalUnavailable(RuntimeError):

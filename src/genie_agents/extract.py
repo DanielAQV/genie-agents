@@ -38,7 +38,7 @@ import re
 from dataclasses import dataclass, field
 
 from . import clock
-from .loops import DONE, LIVE, ME, OPEN, STATES, LoopBook
+from .loops import DONE, DROPPED, LIVE, ME, OPEN, STATES, LoopBook
 from .transcript import Book, Bundle, Line
 
 # 겹 1 값 — 무엇을 후보로 볼 것인가. `docs/wiring.md` 5절.
@@ -167,6 +167,43 @@ def plan(book: Book, *, me_id: str = "", rooms=(), at: str | None = None,
 # 겹 2 — 무엇을 실을 것인가
 # ─────────────────────────────────────────────────────────────────────
 
+def me_names(names: dict, me_id: str) -> list[str]:
+    """남들이 본인을 부르는 이름들.
+
+    ★ 실측에서 이게 없어서 **본인 일이 남 일로 잡혔다.** 팀원들이 본인을
+      "mr Khôi" · "Khôi" 라고 부르는데 이름 표에는 id 밖에 없었고, 모델은
+      그걸 남으로 봤다. 내 일을 남 일로 세면 원장이 **조용히** 틀린다 —
+      목록에 줄은 그대로 있어서 사람이 눈치채기 어렵다.
+    """
+    full = (names or {}).get(me_id, "")
+    got = [x for x in (me_id, full) if x]
+    # "Daniel (Khôi)" → "Daniel" · "Khôi". 사람들은 이 조각으로 부른다.
+    for 조각 in re.split(r"[()\[\]{}·,/]| - ", full):
+        조각 = 조각.strip()
+        if len(조각) >= 2:
+            got.append(조각)
+    return list(dict.fromkeys(got))
+
+
+def owner_of(raw: str, names: dict | None = None, mine: list | None = None) -> str:
+    """모델이 낸 `owner` 를 원장이 쓰는 이름으로 옮긴다.
+
+    ★ 규칙이 모델 위에서 누르는 자리가 하나 더 있다. 모델은 `owner` 에
+      **설명을 적는다** — 실측에서 `"설명 없이 '내가 볼게' 라고 말한 사람"`
+      이 주인으로 들어왔다. 그리고 날 id 를 그대로 적는다.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return ME
+    낮은 = raw.lower()
+    for alias in mine or ():
+        if alias and alias.lower() in 낮은:
+            return ME          # 남들이 부르는 이름으로 적혀 온 내 일
+    if names and raw in names:
+        return names[raw]      # 날 id 를 이름으로
+    return raw
+
+
 def serialize(bundle: Bundle, *, loops: list = (), names: dict | None = None,
               me_id: str = "") -> str:
     """모델에 실을 글 한 덩이.
@@ -272,7 +309,9 @@ def certain(open_: Open, book: Book) -> bool:
     return bool(POINTS_AT.search(line.text))
 
 
-def apply(got: Extraction, loops: LoopBook, book: Book) -> dict:
+def apply(got: Extraction, loops: LoopBook, book: Book, *,
+          bundle: Bundle | None = None, names: dict | None = None,
+          mine: list | None = None) -> dict:
     """원장에 옮긴다. **닫는 것이 먼저다.**
 
     ★ `moves` 를 `opens` 보다 먼저 도는 이유: 못 닫으면 목록이 자라고,
@@ -280,7 +319,8 @@ def apply(got: Extraction, loops: LoopBook, book: Book) -> dict:
 
     돌려주는 것은 **무엇이 실제로 바뀌었나**다 — 모델이 낸 것이 아니라.
     """
-    셈 = {"움직임": 0, "열림": 0, "못 씀": 0}
+    셈 = {"움직임": 0, "열림": 0, "못 씀": 0, "겹침": 0}
+    실린키 = {x.key for x in bundle.lines} if bundle is not None else None
 
     for mv in got.moves:
         if not loops.get(mv.id):
@@ -292,6 +332,25 @@ def apply(got: Extraction, loops: LoopBook, book: Book) -> dict:
             got.dropped.append(f"모르는 상태: {mv.state!r} ({mv.id})")
             셈["못 씀"] += 1
             continue
+
+        # ★ **근거 없이는 안 닫는다.** 여는 쪽에만 걸어 뒀던 규칙인데,
+        #   닫는 쪽이 더 급했다 — 실측에서 모델이 이렇게 닫았다:
+        #   *"본인이 '다 확인했어'를 말하지 않았으나, 전반적으로 완료된 것으로
+        #   판단됨."* 닫는 말이 없는데 닫은 것이다.
+        #
+        #   잘못 닫으면 그 고리는 목록에서 **조용히 사라진다.** 안 닫힌 고리는
+        #   목록에 남아서 사람이 지울 수 있지만, 잘못 닫힌 고리는 사람이 볼
+        #   기회 자체가 없다. 두 실패의 값이 대칭이 아니다.
+        if mv.state in (DONE, DROPPED):
+            if not mv.source:
+                got.dropped.append(f"근거 없이 닫으려 했다: {mv.id}")
+                셈["못 씀"] += 1
+                continue
+            if 실린키 is not None and mv.source not in 실린키:
+                # 이 묶음에 없는 말을 근거로 댔다 — 모델은 그 말을 못 봤다.
+                got.dropped.append(f"묶음에 없는 근거로 닫으려 했다: {mv.id} ({mv.source})")
+                셈["못 씀"] += 1
+                continue
         loops.move(mv.id, mv.note or "추출", state=mv.state or "")
         셈["움직임"] += 1
 
@@ -306,8 +365,22 @@ def apply(got: Extraction, loops: LoopBook, book: Book) -> dict:
             got.dropped.append(f"근거 없는 고리: {op.text[:40]}")
             셈["못 씀"] += 1
             continue
+        # ★ **같은 일을 두 번 안 연다.** `open()` 은 근거가 같을 때만 막는데,
+        #   같은 일이 다른 줄에서 다시 나오는 일이 실제로 있다 — 실측에서 한
+        #   고리가 세 번 열렸다. 못 닫는 것만 목록을 키우는 게 아니라
+        #   **두 번 여는 것도 키운다.**
+        #
+        #   버리지 않고 **움직임으로 적는다.** 다시 나왔다는 것 자체가 그 고리가
+        #   아직 살아 있다는 정보고, 안 적으면 조용한 날짜만 보고 찌르게 된다.
+        있던것 = loops.similar(op.text.strip())
+        if 있던것 is not None:
+            loops.move(있던것.id, f"또 나왔다 — {op.why or op.text[:40]}")
+            셈["겹침"] += 1
+            continue
+
         loops.open(
-            op.text.strip(), source=op.source, owner=op.owner or ME,
+            op.text.strip(), source=op.source,
+            owner=owner_of(op.owner, names, mine),
             due=op.due, sure=certain(op, book), note=op.why or "추출",
         )
         셈["열림"] += 1
@@ -318,7 +391,17 @@ def apply(got: Extraction, loops: LoopBook, book: Book) -> dict:
 # 한 번 돌리기
 # ─────────────────────────────────────────────────────────────────────
 
-def ask(client, model: str, prompt: str, body: str, *, max_tokens: int = 2048) -> str:
+MAX_OUT = 768
+"""한 번에 낼 수 있는 최대 토큰.
+
+★ 실측(2026-08-31): 상한이 2048 이었을 때 한 호출이 **1,031 토큰**을 냈고
+  241초가 걸렸다 — 그리고 그 다음 호출이 시간 초과로 죽었다. 이 자리가 내는
+  것은 JSON 하나이고, 길어지는 것은 잘 판단한다는 뜻이 아니라 **장황해진다**는
+  뜻이다. 잘려도 `parse` 가 그 턴을 통째로 안 버린다.
+"""
+
+
+def ask(client, model: str, prompt: str, body: str, *, max_tokens: int = MAX_OUT) -> str:
     """모델 한 번. **도구를 안 넘긴다.**
 
     ★ 도구를 넘기면 모델이 도구를 부르려 들고, 그 턴들이 전부 값이다.

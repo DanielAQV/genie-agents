@@ -33,12 +33,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MODEL = None
 TOK = None
 NAME = ""
+LOCK = threading.Lock()
+"""한 번에 하나만 만든다.
+
+★ `ThreadingHTTPServer` 는 요청마다 실을 하나 낸다. 6GB 짜리 카드에서 생성이
+  둘 겹치면 KV 캐시가 두 벌 잡히고 그대로 OOM 이다. 상주 서버의 값은 가중치를
+  한 번만 올리는 것이지 동시에 여럿을 받는 것이 아니다."""
 
 
 def load(model_id: str, bits: int, device: str):
@@ -72,30 +79,47 @@ def load(model_id: str, bits: int, device: str):
 
 
 def generate(messages: list[dict], max_tokens: int, temperature: float) -> dict:
+    """한 번 만든다. **끝나면 캐시를 비운다.**
+
+    ★ 안 비우면 KV 캐시 조각이 쌓인다. 실측(2026-08-31): 20호출을 돌리고 나니
+      가중치가 2.49GB 인데 VRAM 이 **5,933 / 6,144 MiB** 였고, 속도가 6.6 →
+      0.3 tok/s 로 떨어지다 한 호출이 **833초**를 썼다. 카드가 작을수록
+      "언젠가 알아서 정리되겠지" 가 안 통한다.
+    """
     import torch
 
-    text = TOK.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    ins = TOK(text, return_tensors="pt").to(MODEL.device)
-    n_in = ins.input_ids.shape[-1]
-    with torch.no_grad():
-        out = MODEL.generate(
-            **ins,
-            max_new_tokens=max_tokens,
-            # ★ 온도 0 이면 표집을 끈다. 정해진 모양의 JSON 을 내는 자리라
-            #   다양성이 값이 아니다 — 어댑터가 0.2 를 보내는 것과 같은 생각이다.
-            do_sample=temperature > 0,
-            temperature=temperature or None,
-            top_p=0.9 if temperature > 0 else None,
-            pad_token_id=TOK.eos_token_id,
-        )
-    새것 = out[0][n_in:]
-    끝났나 = 새것.shape[-1] < max_tokens
-    return {
-        "text": TOK.decode(새것, skip_special_tokens=True),
-        "in": n_in,
-        "out": int(새것.shape[-1]),
-        "finish": "stop" if 끝났나 else "length",
-    }
+    with LOCK:
+        text = TOK.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        ins = TOK(text, return_tensors="pt").to(MODEL.device)
+        n_in = ins.input_ids.shape[-1]
+        try:
+            with torch.no_grad():
+                out = MODEL.generate(
+                    **ins,
+                    max_new_tokens=max_tokens,
+                    # ★ 온도 0 이면 표집을 끈다. 정해진 모양의 JSON 을 내는
+                    #   자리라 다양성이 값이 아니다.
+                    do_sample=temperature > 0,
+                    temperature=temperature or None,
+                    top_p=0.9 if temperature > 0 else None,
+                    pad_token_id=TOK.eos_token_id,
+                )
+            새것 = out[0][n_in:].clone()
+            끝났나 = 새것.shape[-1] < max_tokens
+            got = {
+                "text": TOK.decode(새것, skip_special_tokens=True),
+                "in": n_in,
+                "out": int(새것.shape[-1]),
+                "finish": "stop" if 끝났나 else "length",
+            }
+        finally:
+            # `locals().pop(...)` 은 아무것도 안 지운다 — CPython 에서
+            # `locals()` 는 사본이다. 이름을 직접 지워야 참조가 풀린다.
+            out = ins = 새것 = None
+            del out, ins, 새것
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        return got
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -137,8 +161,19 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         걸린 = time.time() - t0
+        쓴것 = ""
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                쓴것 = f" · VRAM {torch.cuda.memory_reserved() / 1024**3:.2f}GB"
+        except Exception:  # noqa: BLE001
+            pass
+        # ★ VRAM 을 같이 찍는다. 이 수가 조용히 자라는 것이 이 물건이
+        #   느려지는 방식이라, 안 찍으면 느려진 뒤에야 안다.
         print(f"  {got['in']:>5}→{got['out']:<5} 토큰 · {걸린:5.1f}초 "
-              f"· {got['out'] / max(걸린, 0.01):4.1f} tok/s · {got['finish']}", flush=True)
+              f"· {got['out'] / max(걸린, 0.01):4.1f} tok/s · {got['finish']}{쓴것}",
+              flush=True)
         self._send(200, {
             "id": "local", "object": "chat.completion", "model": NAME,
             "choices": [{"index": 0, "finish_reason": got["finish"],

@@ -62,6 +62,12 @@ LIVE = (OPEN, WAITING)
 ME = "나"
 
 
+def _pairs(text: str) -> set[str]:
+    """글자 두 쪽씩. 낱말로 안 자르는 이유는 `LoopBook.similar` 에 있다."""
+    t = "".join(c for c in text.lower() if c.isalnum())
+    return {t[i:i + 2] for i in range(len(t) - 1)}
+
+
 @dataclass
 class Move:
     """고리가 움직인 자국. 언제 무엇이 있었나."""
@@ -191,6 +197,39 @@ class LoopBook:
 
     def by_source(self, source: str) -> Loop | None:
         return next((x for x in self._items if x.source == source), None)
+
+    def similar(self, text: str, *, cutoff: float = 0.5) -> Loop | None:
+        """살아 있는 고리 중 **같은 일을 가리키는 것**. 없으면 `None`.
+
+        ★ `open()` 은 근거가 같을 때만 막는다. 그런데 같은 일이 **다른 줄에서**
+          다시 나오는 일이 실제로 있다 — 실측에서 한 고리가 세 번 열렸다.
+          근거가 다르니 `open()` 은 막을 수가 없다.
+
+        ★ 못 닫는 것만 목록을 키우는 게 아니다. **두 번 여는 것도 키운다.**
+          그리고 자란 목록은 안 읽히고, 안 읽히는 목록은 없는 것과 같다.
+
+        글자 두 쪽 겹침으로 본다. 한국어·베트남어가 섞여 오는 자리라 낱말로
+        자르면 한쪽에서만 맞는다 — **글자로 보면 둘 다에서 같게 는다.**
+
+        실측(2026-08-31, 리허설 10일치): 진짜 중복 셋이 **0.57 · 0.88 · 1.00**,
+        남남은 **0.00 · 0.00 · 0.07** 이었다. 사이가 텅 비어서 문턱을 어디에
+        두든 같다 — 그래서 0.5 다. 다시 재야 할 때는 그 간격부터 본다.
+
+        ★ 여기는 **묻는 자리이지 정하는 자리가 아니다.** 몇을 같게 볼지는
+          부르는 쪽이 정한다(`extract.apply`) — 원장은 판단을 안 든다.
+        """
+        want = _pairs(text)
+        if not want:
+            return None
+        best, score = None, cutoff
+        for x in self.live():
+            got = _pairs(x.text)
+            if not got:
+                continue
+            겹 = len(want & got) / len(want | got)
+            if 겹 >= score:
+                best, score = x, 겹
+        return best
 
     def live(self, *, owner: str = "", sure_only: bool = False) -> list[Loop]:
         """아직 안 끝난 것. 오래 조용한 것이 앞이다 — 그게 먼저 봐야 할 것이다."""
