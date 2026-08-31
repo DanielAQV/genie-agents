@@ -6,6 +6,7 @@
     python -m genie_agents wake  <폴더> [--kind 따라잡기]   깨어난다 (밖에서 부른다)
     python -m genie_agents rooms <폴더>                     방 id 를 찾는다 (한 번 쓰고 만다)
     python -m genie_agents rehearse <폴더> --from … --to …  며칠 전인 척 다시 돌린다
+    python -m genie_agents extract  <폴더> [--dry-run]      쌓인 말에서 고리를 캔다
 
 ★ 설정은 **그 폴더의 `.env`** 에서 읽는다(`<폴더>/.env`). 현재 디렉토리가 아니다 —
   한 호스트에 에이전트 여럿이 살고, cwd 로 읽으면 **어디서 불렀느냐에 따라 남의
@@ -270,7 +271,8 @@ def cmd_rooms(args) -> int:
     slack = Slack(token)
     try:
         me = str(slack.call("auth.test").get("user_id") or "")
-        got = rooms(slack, types=args.types, humans_only=not args.all, me=me)
+        got = rooms(slack, types=args.types or ",".join(KINDS),
+                    humans_only=not args.all, me=me)
     except SlackError as e:
         print(f"✗ {e}", file=sys.stderr)
         return 1
@@ -408,6 +410,95 @@ def cmd_rehearse(args) -> int:
     return 0
 
 
+def cmd_extract(args) -> int:
+    """겹 1~3 을 한 번 돌린다(`docs/wiring.md` 5절).
+
+    ★ **`--dry-run` 이 기본으로 쓰이는 자리다.** 무엇이 모델에 실릴지를 먼저
+      눈으로 보라 — 팀원의 글이 밖으로 나가는 첫 자리가 여기다.
+    """
+    from .spec import BadSpec, load
+
+    _settings(args.folder)
+    try:
+        spec = load(args.folder)
+    except BadSpec as e:
+        print(f"✗ {e}", file=sys.stderr)
+        return 1
+    if not spec.extract:
+        print("✗ [prompt] extract 가 없다 — 무엇을 고리로 볼지는 이 비서가 정한다",
+              file=sys.stderr)
+        return 1
+
+    from . import clock, env, extract as ex
+    from .cursors import Cursors
+    from .loops import LoopBook
+    from .transcript import Book
+
+    env.use(spec.prefix)
+    clock.set_default(spec.prefix, spec.timezone, spec.utc_offset)
+
+    root = Path(args.root) if args.root else spec.state_root
+    book, loops = Book(root), LoopBook(root)
+    me_id = args.me or env.get("SLACK_ME") or ""
+
+    묶음 = ex.plan(book, me_id=me_id, rooms=tuple(spec.watch.get("slack") or ()))
+    if not 묶음:
+        print("  태울 것이 없다 — 겹 1 이 후보를 하나도 안 골랐다")
+        return 0
+
+    names = {}
+    if args.names and Path(args.names).exists():
+        import json as _json
+
+        names = _json.loads(Path(args.names).read_text(encoding="utf-8"))
+
+    print(f"  {root} · 묶음 {len(묶음)}개 · 열린 고리 {len(loops.live())}개")
+    실린것 = []
+    for b in 묶음:
+        why = ex.worth_asking(b, me_id)
+        body = ex.serialize(b, loops=loops.live(), names=names, me_id=me_id)
+        실린것.append((b, why, body))
+
+    if args.dry_run:
+        for b, why, body in 실린것:
+            머리 = f"{b.room}" + (f" · 스레드 {b.thread}" if b.thread else " · 최근")
+            print(f"{chr(10)}── {머리}  ({len(b)}줄 · {len(body):,}자 · {why})")
+            if args.full:
+                print(body)
+        전체 = sum(len(x[2]) for x in 실린것)
+        print(f"{chr(10)}  합 {전체:,}자 ≈ {int(전체 * 0.4):,}토큰"
+              f" (묶음당 평균 {int(전체 / len(실린것) * 0.4):,})")
+        print("  ★ --dry-run 이라 모델을 안 불렀다. 아무것도 밖으로 안 나갔다.")
+        return 0
+
+    from .runner import _client_for, _default_model
+
+    client = _client_for(spec)
+    model = spec.model or _default_model(spec)
+    셈 = {"움직임": 0, "열림": 0, "못 씀": 0}
+    못푼것 = []
+    for b, why, body in 실린것:
+        text = ex.ask(client, model, spec.extract, body)
+        got = ex.parse(text)
+        for k, v in ex.apply(got, loops, book).items():
+            셈[k] += v
+        못푼것 += got.unresolved
+        머리 = f"{b.room}" + (f"·{b.thread}" if b.thread else "")
+        print(f"  {머리:<28} 움직임 {len(got.moves)} · 열림 {len(got.opens)}"
+              f" · 못 찾음 {len(got.unresolved)}"
+              + (f" · 버림 {len(got.dropped)}" if got.dropped else ""))
+        for d in got.dropped:
+            print(f"      · {d}")
+
+    print(f"{chr(10)}  원장 {len(loops)}줄 · 살아 있는 것 {len(loops.live())}개 · {셈}")
+    if 못푼것:
+        # ★ 못 찾은 것을 조용히 버리면 사람이 고칠 기회 자체가 사라진다.
+        print(f"{chr(10)}  못 찾은 말 {len(못푼것)}개 — 저녁 목록에 이대로 올라간다")
+        for u in 못푼것[:10]:
+            print(f"    · \"{u.said}\" — {u.why}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="genie_agents", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -438,12 +529,12 @@ def main(argv: list[str] | None = None) -> int:
                    help="무엇이 밀렸는지만 보고 안 적는다")
     w.set_defaults(fn=cmd_wake)
 
-    from .channels.slack import KINDS
-
+    # ★ 여기서 `channels.slack` 을 import 하면 **모든 명령이** 그걸 진다 —
+    #   도움말 문자열 하나 때문에. 어댑터는 늦게 부른다(pyproject 첫머리와 같은 규칙).
     r = sub.add_parser("rooms", help="[watch] 에 넣을 방 id 를 찾는다")
     r.add_argument("folder")
-    r.add_argument("--types", default=",".join(KINDS),
-                   help=f"쉼표로. 아는 것: {', '.join(KINDS)}")
+    r.add_argument("--types", default="",
+                   help="쉼표로. im, mpim, private_channel, public_channel")
     r.add_argument("--all", action="store_true",
                    help="앱 DM·퇴사자 DM 까지 전부 (기본은 사람 DM 만)")
     r.set_defaults(fn=cmd_rooms)
@@ -459,6 +550,16 @@ def main(argv: list[str] | None = None) -> int:
                    help="안 버린다. 재는 동안 버리면 잴 것이 없다")
     h.add_argument("--verbose", action="store_true", help="0줄인 걸음도 찍는다")
     h.set_defaults(fn=cmd_rehearse)
+
+    x = sub.add_parser("extract", help="쌓인 말에서 고리를 캔다 (겹 1~3)")
+    x.add_argument("folder")
+    x.add_argument("--root", default="", help="어느 원장에 (기본 <폴더>/.<id>)")
+    x.add_argument("--me", default="", help="본인 slack id. 멘션을 알아보려면 필요하다")
+    x.add_argument("--names", default="", help="{id: 이름} JSON 파일")
+    x.add_argument("--dry-run", action="store_true",
+                   help="모델을 안 부르고 무엇이 실릴지만 본다")
+    x.add_argument("--full", action="store_true", help="--dry-run 에서 본문까지 찍는다")
+    x.set_defaults(fn=cmd_extract)
 
     args = p.parse_args(argv)
     return args.fn(args)

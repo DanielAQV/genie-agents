@@ -47,6 +47,12 @@ class Spec:
     utc_offset: float
     instructions: str
     identity: str
+    extract: str
+    """추출 호출이 읽는 지침. **도구 루프가 아닌 자리**라 `instructions` 와 다르다.
+
+    ★ 무엇을 고리로 볼지는 그 사람의 일에 딸린 것이라 골격이 안 정한다
+      (`docs/wiring.md` 7절). 없으면 추출을 안 돈다.
+    """
     policy: Policy
     nudge: Nudge
     """부르지 않았는데 말하는 것의 상한. 안 적으면 골격 기본값이다."""
@@ -135,7 +141,7 @@ def _policy(raw: dict) -> Policy:
 # UTC 로 돌고, 그건 몇 주 뒤 시간이 이상한 걸로 발견된다.
 _SECTIONS = {
     "agent": {"id", "prefix", "adapter", "model", "timezone", "utc_offset"},
-    "prompt": {"instructions", "identity"},
+    "prompt": {"instructions", "identity", "extract"},
     "tools": {"module", "gated", "enable", "describe"},
     "nudge": set(Nudge.__dataclass_fields__),
     "watch": {"slack", "first_days", "thread_days", "keep_hours", "keep_thread_days"},
@@ -198,6 +204,7 @@ def load(root: Path | str) -> Spec:
         utc_offset=float(a.get("utc_offset") or 0),
         instructions=_text(root, str(p.get("instructions") or ""), "지침", required=True),
         identity=_text(root, str(p.get("identity") or ""), "정체성", required=False),
+        extract=_text(root, str(p.get("extract") or ""), "추출 지침", required=False),
         policy=_policy(raw.get("policy") or {}),
         nudge=_nudge(raw.get("nudge") or {}),
         gated=tuple(t.get("gated") or ()),
@@ -223,6 +230,8 @@ timezone = "Asia/Seoul"
 [prompt]
 instructions = "prompt.md"   # 지침 — 구조로 강제할 수 없는 것만 적는다
 identity     = "identity.md" # 정체성 — 이 존재가 누구인지 (없어도 된다)
+# extract    = "extract.md"   # 추출이 읽는 지침. 도구 루프가 아닌 자리다.
+#                             # 무엇을 고리로 볼지는 그 사람의 일에 딸린 것이다
 
 # 할 수 있는 일. **골격 것을 켜든지, 자기 것을 들고 오든지 — 하나만 고른다.**
 # 섞으면 같은 이름이 둘일 때 어느 쪽이 도는지 코드를 읽어야 안다.
