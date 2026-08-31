@@ -447,7 +447,7 @@ def _replay(args, spec, root, 옛판) -> int:
               f" · 못 찾음 {len(got.unresolved)}"
               + (f" · 버림 {len(got.dropped)}" if got.dropped else ""))
         cases.add(run=판, prompt_sha=지침sha, room=c.room, thread=c.thread,
-                  keys=list(c.keys), body=c.body, raw=text,
+                  keys=list(c.keys), span=list(c.span), body=c.body, raw=text,
                   parsed={"moves": [asdict(m) for m in got.moves],
                           "opens": [asdict(o) for o in got.opens],
                           "unresolved": [asdict(u) for u in got.unresolved],
@@ -570,7 +570,7 @@ def cmd_extract(args) -> int:
             # ★ 켜야 남는다. `body` 에 팀원의 원문이 그대로 들어 있고,
             #   `transcript` 의 72시간이 여기엔 안 걸린다(`cases.py`).
             cases.add(run=판, prompt_sha=지침sha, room=b.room, thread=b.thread,
-                      keys=[x.key for x in b.lines], body=body, raw=text,
+                      keys=[x.key for x in b.lines], span=list(b.span), body=body, raw=text,
                       parsed={"moves": [asdict(m) for m in got.moves],
                               "opens": [asdict(o) for o in got.opens],
                               "unresolved": [asdict(u) for u in got.unresolved],
@@ -616,6 +616,20 @@ def cmd_cases(args) -> int:
     env.use(spec.prefix)
     root = Path(args.root) if args.root else spec.state_root
     cases = CaseBook(root)
+
+    if args.serve:
+        # ★ 127.0.0.1 에만 묶는다. 이 화면에 뜨는 것은 팀원들의 DM 원문이다.
+        from .review import serve
+
+        srv = serve(root, port=args.port)
+        print(f"  {srv.주소}  · 판 {len(srv.book.runs())}개 · 묶음 {len(srv.book)}개")
+        print("  줄마다 맞음/아님을 짚고, 마지막에 '빠뜨린 것 있나'를 답한다")
+        print("  j/k 이동 · 0 빠뜨린 것 없음 · / 적기      (Ctrl+C 로 닫는다)")
+        try:
+            srv.serve_forever()
+        except KeyboardInterrupt:
+            print(f"{chr(10)}  닫았다 — {srv.book.score()}")
+        return 0
 
     if args.mark:
         cid, _, verdict = args.mark.partition("=")
@@ -748,6 +762,9 @@ def main(argv: list[str] | None = None) -> int:
     cs.add_argument("--compare", default="", help="이 판과 견준다")
     cs.add_argument("--mark", default="", help="<id> 또는 <id>=맞음")
     cs.add_argument("--note", default="", help="왜 틀렸나 한 줄")
+    cs.add_argument("--serve", action="store_true",
+                    help="화면으로 본다 (127.0.0.1 에만 뜬다)")
+    cs.add_argument("--port", type=int, default=8765)
     cs.add_argument("--all", action="store_true", help="본 것까지 전부")
     cs.add_argument("--limit", type=int, default=0)
     cs.set_defaults(fn=cmd_cases)

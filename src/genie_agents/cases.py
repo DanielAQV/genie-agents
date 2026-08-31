@@ -83,15 +83,50 @@ class Case:
     seconds: float = 0.0
     tokens: dict = field(default_factory=dict)
 
+    span: list[str] = field(default_factory=list)
+    """이 묶음이 덮는 시각 `[처음, 끝]`.
+
+    ★ **판단은 이 시각 기준이다.** 모델은 그 뒤에 무슨 일이 있었는지 몰랐다.
+      화면이 이걸 안 보여 주면 사람은 *지금* 기준으로 보게 되고, 그러면
+      "이건 이미 끝난 일인데" 로 멀쩡한 판정을 틀렸다고 짚는다.
+    """
+
+    marks: dict = field(default_factory=dict)
+    """**낸 줄마다** 하나씩. `"opens:0"` → `맞음`/`틀림`.
+
+    ★ 판 단위 판정은 너무 굵다. 고리 셋이 나왔는데 둘이 맞고 하나가
+      쓰레기면 그건 맞음도 틀림도 아니다 — 그리고 그 판을 통째로 틀렸다고
+      세면 **잘한 둘까지 같이 벌을 받는다.**
+    """
+
+    missed: str = ""
+    """빠뜨린 것. `""` 아직 안 봄 · `"없음"` · 그 밖은 무엇을 빠뜨렸나.
+
+    ★ 낸 것이 맞는지(정밀도)와 빠뜨린 게 없는지(재현)는 다른 물음이고,
+      **묶음을 읽어야만 답할 수 있는 쪽은 뒤엣것**이다. 그래서 화면이
+      묶음을 같이 보여 준다.
+    """
+
     verdict: str = ""
-    """`""` 는 **아직 안 본 것**이지 맞은 것이 아니다."""
+    """옛 판의 판 단위 판정. 새 판은 `marks`/`missed` 로 센다."""
 
     note: str = ""
     """왜 틀렸나. 사람이 한 줄 적는 자리 — 다음 지침이 여기서 나온다."""
 
     @property
+    def items(self) -> list[tuple[str, dict]]:
+        """낸 줄들을 `("opens:0", {...})` 로 편다. 화면과 채점이 같은 열쇠를 쓴다."""
+        got = []
+        for kind in ("moves", "opens", "unresolved"):
+            for i, x in enumerate((self.parsed or {}).get(kind) or []):
+                got.append((f"{kind}:{i}", x))
+        return got
+
+    @property
     def seen(self) -> bool:
-        return self.verdict in VERDICTS
+        """**빠뜨린 것까지 답해야 본 것이다.** 낸 줄만 짚고 넘어가면
+        재현이 영영 안 잰다 — 그리고 안 재는 쪽이 늘 좋아 보인다."""
+        return bool(self.missed) or self.verdict in VERDICTS
 
     @property
     def counts(self) -> dict:
@@ -125,17 +160,36 @@ class CaseBook:
                 f.write(json.dumps(asdict(c), ensure_ascii=False) + "\n")
         tmp.replace(self.path)
 
-    def mark(self, cid: str, verdict: str, note: str = "") -> Case | None:
-        """사람이 틀렸다고 짚는다. **이게 사람이 하는 유일한 입력이다.**"""
+    def _find(self, items, cid: str) -> Case | None:
+        for c in items:
+            if c.id == cid or (len(cid) >= 4 and c.id.startswith(cid)):
+                return c
+        return None
+
+    def mark(self, cid: str, verdict: str, note: str = "", item: str = "") -> Case | None:
+        """사람이 짚는다. **이게 사람이 하는 유일한 입력이다.**
+
+        `item` 을 주면 그 줄 하나, 안 주면 판 전체(옛 방식).
+        """
         if verdict not in VERDICTS:
             raise ValueError(f"모르는 판정이다: {verdict!r} ({' | '.join(VERDICTS)})")
         items = self.all()
-        got = None
-        for c in items:
-            if c.id == cid or (len(cid) >= 4 and c.id.startswith(cid)):
-                c.verdict, c.note, got = verdict, note or c.note, c
-                break
+        got = self._find(items, cid)
         if got is not None:
+            if item:
+                got.marks[item] = verdict
+            else:
+                got.verdict = verdict
+            got.note = note or got.note
+            self._rewrite(items)
+        return got
+
+    def missed(self, cid: str, what: str = "없음") -> Case | None:
+        """빠뜨린 것이 있나. **이걸 답해야 그 판을 본 것이다.**"""
+        items = self.all()
+        got = self._find(items, cid)
+        if got is not None:
+            got.missed = what or "없음"
             self._rewrite(items)
         return got
 
@@ -180,14 +234,22 @@ class CaseBook:
         """
         got = self.run(name or self.last())
         본것 = [c for c in got if c.seen]
-        맞음 = [c for c in 본것 if c.verdict == RIGHT]
         깨짐 = [c for c in got if not c.parsed]
+
+        # 정밀도 — **낸 줄 중에** 몇이 맞았나. 안 짚은 줄은 안 센다.
+        짚은줄 = [(c, k) for c in got for k in c.marks]
+        맞은줄 = [1 for c, k in 짚은줄 if c.marks[k] == RIGHT]
+        # 재현 — 빠뜨린 게 없다고 답한 판의 비율. 답 안 한 판은 안 센다.
+        답한판 = [c for c in got if c.missed]
+        안빠뜨림 = [c for c in 답한판 if c.missed == "없음"]
         return {
             "판": name or self.last(),
             "묶음": len(got),
             "본 것": len(본것),
-            "맞음": len(맞음),
-            "정답률": round(len(맞음) / len(본것), 3) if 본것 else None,
+            "낸 줄": sum(len(c.items) for c in got),
+            "짚은 줄": len(짚은줄),
+            "정밀도": round(len(맞은줄) / len(짚은줄), 3) if 짚은줄 else None,
+            "재현": round(len(안빠뜨림) / len(답한판), 3) if 답한판 else None,
             "형식 깨짐": len(깨짐),
             "낸 것": {
                 k: sum(c.counts[k] for c in got)
@@ -211,6 +273,7 @@ class CaseBook:
                 continue
             old = 옛것.get((c.room, c.thread))
             if old is not None and old.raw.strip() == c.raw.strip():
+                c.marks, c.missed = dict(old.marks), old.missed
                 c.verdict, c.note = old.verdict, old.note
                 n += 1
         if n:

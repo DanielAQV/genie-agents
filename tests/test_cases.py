@@ -68,15 +68,41 @@ def test_안_본_것은_맞은_것이_아니다(book, frozen):
     for _ in range(5):
         적기(book)
     s = book.score("1판")
-    assert s["묶음"] == 5 and s["본 것"] == 0 and s["정답률"] is None
+    assert s["묶음"] == 5 and s["본 것"] == 0
+    assert s["정밀도"] is None and s["재현"] is None
 
 
-def test_본_것_중에서만_센다(book, frozen):
-    a, b, c = 적기(book, room="C1"), 적기(book, room="C2"), 적기(book, room="C3")
-    book.mark(a.id, RIGHT)
-    book.mark(b.id, WRONG, "고리가 아닌 걸 열었다")
+def test_낸_줄마다_따로_센다(book, frozen):
+    """★ 판 단위 판정은 너무 굵다. 고리 셋 중 둘이 맞고 하나가 쓰레기면
+    그 판을 통째로 틀렸다고 셀 때 **잘한 둘까지 같이 벌을 받는다.**"""
+    c = 적기(book, parsed={"moves": [], "unresolved": [],
+                         "opens": [{"text": "가"}, {"text": "나"}, {"text": "쓰레기"}]})
+    book.mark(c.id, RIGHT, item="opens:0")
+    book.mark(c.id, RIGHT, item="opens:1")
+    book.mark(c.id, WRONG, item="opens:2")
     s = book.score("1판")
-    assert s["본 것"] == 2 and s["맞음"] == 1 and s["정답률"] == 0.5
+    assert s["낸 줄"] == 3 and s["짚은 줄"] == 3
+    assert s["정밀도"] == round(2 / 3, 3)
+
+
+def test_빠뜨린_것을_따로_묻는다(book, frozen):
+    """★ 낸 것이 맞는지(정밀도)와 빠뜨린 게 없는지(재현)는 다른 물음이다.
+    묶음을 읽어야만 답할 수 있는 쪽은 뒤엣것이라, 안 물으면 영영 안 잰다."""
+    a, b = 적기(book, room="C1"), 적기(book, room="C2")
+    book.missed(a.id)                      # 없음
+    book.missed(b.id, "Thịnh 부탁을 놓쳤다")
+    s = book.score("1판")
+    assert s["재현"] == 0.5
+
+
+def test_빠뜨린_것을_답해야_본_것이다(book, frozen):
+    """낸 줄만 짚고 넘어가면 재현이 영영 안 잰다 — 그리고 **안 재는 쪽이
+    늘 좋아 보인다.**"""
+    c = 적기(book, parsed={"moves": [], "unresolved": [], "opens": [{"text": "가"}]})
+    book.mark(c.id, RIGHT, item="opens:0")
+    assert book.score("1판")["본 것"] == 0      # 아직 안 봤다
+    book.missed(c.id)
+    assert book.score("1판")["본 것"] == 1
 
 
 def test_빈_답과_못_읽은_답을_가른다(book, frozen):
@@ -104,7 +130,7 @@ def test_같은_답이면_앞_판정을_물려받는다(book, frozen):
     """★ 지침만 바꿔 다시 돌리면 묶음은 그대로다. 사람이 이미 본 것을 또
     보게 하면 **두 번째 판부터 아무도 안 본다** — 눈금이 첫 판에서 멈춘다."""
     a = 적기(book, run="1판", room="C01", raw='{"opens": []}')
-    book.mark(a.id, RIGHT)
+    book.missed(a.id)
     적기(book, run="2판", room="C01", raw='{"opens": []}')
     assert book.carry("1판", "2판") == 1
     assert book.score("2판")["본 것"] == 1
@@ -114,7 +140,7 @@ def test_답이_달라졌으면_안_물려받는다(book, frozen):
     """★ 여기가 이 장치가 조용히 후해지는 자리다. 답이 바뀌었는데 옛 판정을
     물려주면, 나빠진 판이 앞 판의 점수를 그대로 입는다."""
     a = 적기(book, run="1판", room="C01", raw='{"opens": []}')
-    book.mark(a.id, RIGHT)
+    book.missed(a.id)
     적기(book, run="2판", room="C01", raw='{"opens": [{"text": "새로 지어낸 것"}]}')
     assert book.carry("1판", "2판") == 0
     assert book.score("2판")["본 것"] == 0
@@ -123,10 +149,10 @@ def test_답이_달라졌으면_안_물려받는다(book, frozen):
 def test_이미_본_것은_안_덮는다(book, frozen):
     a = 적기(book, run="1판", room="C01")
     b = 적기(book, run="2판", room="C01")
-    book.mark(a.id, RIGHT)
-    book.mark(b.id, WRONG, "사람이 직접 봤다")
+    book.missed(a.id)
+    book.missed(b.id, "사람이 직접 봤다")
     book.carry("1판", "2판")
-    assert book.all()[-1].verdict == WRONG
+    assert book.all()[-1].missed == "사람이 직접 봤다"
 
 
 # ── 판을 가른다 ────────────────────────────────────────────────────
