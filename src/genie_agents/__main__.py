@@ -452,14 +452,15 @@ def cmd_extract(args) -> int:
 
         names = _json.loads(Path(args.names).read_text(encoding="utf-8"))
 
+    # ★ **시간 순으로 돈다.** 앞의 대화가 연 고리를 뒤의 대화가 닫는다 —
+    #   순서가 뒤집히면 닫는 말을 먼저 보고, 그러면 무엇을 닫는지 모른다.
+    묶음.sort(key=lambda b: b.span[0])
     print(f"  {root} · 묶음 {len(묶음)}개 · 열린 고리 {len(loops.live())}개")
-    실린것 = []
-    for b in 묶음:
-        why = ex.worth_asking(b, me_id)
-        body = ex.serialize(b, loops=loops.live(), names=names, me_id=me_id)
-        실린것.append((b, why, body))
 
     if args.dry_run:
+        실린것 = [(b, ex.worth_asking(b, me_id),
+                 ex.serialize(b, loops=loops.live(), names=names, me_id=me_id))
+                for b in 묶음]
         for b, why, body in 실린것:
             머리 = f"{b.room}" + (f" · 스레드 {b.thread}" if b.thread else " · 최근")
             print(f"{chr(10)}── {머리}  ({len(b)}줄 · {len(body):,}자 · {why})")
@@ -477,7 +478,12 @@ def cmd_extract(args) -> int:
     model = spec.model or _default_model(spec)
     셈 = {"움직임": 0, "열림": 0, "못 씀": 0}
     못푼것 = []
-    for b, why, body in 실린것:
+    for b in 묶음:
+        # ★ **부르기 직전에 싣는다.** 미리 전부 직렬화해 두면 열린 고리 목록이
+        #   *시작할 때의 것*으로 굳어서, 앞 묶음이 연 고리를 뒤 묶음이 못 본다.
+        #   그러면 `moves` 가 가리킬 것이 영영 없고 — 실제로 첫 판에서
+        #   움직임이 0이었다 — 목록은 자라기만 한다.
+        body = ex.serialize(b, loops=loops.live(), names=names, me_id=me_id)
         text = ex.ask(client, model, spec.extract, body)
         got = ex.parse(text)
         for k, v in ex.apply(got, loops, book).items():
