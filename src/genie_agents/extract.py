@@ -101,6 +101,11 @@ class Extraction:
     dropped: list[str] = field(default_factory=list)
     """읽다 못 쓴 것들. 예외로 안 던지고 여기 모은다."""
 
+    parsed_ok: bool = True
+    """JSON 을 아예 못 읽었나. **셋이 다 빈 것과 못 읽은 것은 다르다** —
+    앞은 아무 일도 안 일어난 창이고, 뒤는 그 창을 놓친 것이다. 점수를 낼 때
+    둘을 같게 세면 조용한 날이 성적을 올려 준다."""
+
     def __len__(self) -> int:
         return len(self.moves) + len(self.opens) + len(self.unresolved)
 
@@ -262,9 +267,11 @@ def parse(text: str) -> Extraction:
         d = json.loads(raw)
     except ValueError as e:
         got.dropped.append(f"JSON 을 못 읽었다: {e}")
+        got.parsed_ok = False
         return got
     if not isinstance(d, dict):
         got.dropped.append(f"JSON 이 사전이 아니다: {type(d).__name__}")
+        got.parsed_ok = False
         return got
 
     for kind, into, cls in (("moves", got.moves, Move),

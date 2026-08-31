@@ -7,6 +7,7 @@
     python -m genie_agents rooms <폴더>                     방 id 를 찾는다 (한 번 쓰고 만다)
     python -m genie_agents rehearse <폴더> --from … --to …  며칠 전인 척 다시 돌린다
     python -m genie_agents extract  <폴더> [--dry-run]      쌓인 말에서 고리를 캔다
+    python -m genie_agents cases    <폴더> [--mark …]       판을 보고 틀린 것을 짚는다
 
 ★ 설정은 **그 폴더의 `.env`** 에서 읽는다(`<폴더>/.env`). 현재 디렉토리가 아니다 —
   한 호스트에 에이전트 여럿이 살고, cwd 로 읽으면 **어디서 불렀느냐에 따라 남의
@@ -410,12 +411,65 @@ def cmd_rehearse(args) -> int:
     return 0
 
 
+def _replay(args, spec, root, 옛판) -> int:
+    """적어 둔 묶음을 지금 지침으로 다시 돌린다.
+
+    ★ 원장은 안 건드린다. 재생은 **무엇이 나오나**를 보는 것이지 원장을
+      채우는 것이 아니다 — 채우면 판마다 원장이 두 배가 된다.
+    """
+    import time
+    from dataclasses import asdict
+
+    from . import clock, extract as ex
+    from .cases import CaseBook, sha
+    from .runner import _client_for, _default_model
+
+    cases = CaseBook(root)
+    판 = args.run or clock.local().strftime("%m%d-%H%M")
+    지침sha = sha(spec.extract)
+    client = _client_for(spec)
+    model = spec.model or _default_model(spec)
+    앞판sha = sorted({c.prompt_sha for c in 옛판})
+
+    print(f"  재생 {args.replay} → {판} · 묶음 {len(옛판)}개")
+    print(f"  지침 {' '.join(앞판sha)} → {지침sha}"
+          + ("   (같다 — 모델의 흔들림만 본다)" if 앞판sha == [지침sha] else ""))
+
+    깨짐 = 0
+    for c in (옛판[: args.limit] if args.limit else 옛판):
+        t0 = time.time()
+        text = ex.ask(client, model, spec.extract, c.body)
+        got = ex.parse(text)
+        깨짐 += 0 if got.parsed_ok else 1
+        같나 = "=" if text.strip() == c.raw.strip() else " "
+        머리 = f"{c.room}" + (f"·{c.thread}" if c.thread else "")
+        print(f"  {같나} {머리:<28} 움직임 {len(got.moves)} · 열림 {len(got.opens)}"
+              f" · 못 찾음 {len(got.unresolved)}"
+              + (f" · 버림 {len(got.dropped)}" if got.dropped else ""))
+        cases.add(run=판, prompt_sha=지침sha, room=c.room, thread=c.thread,
+                  keys=list(c.keys), body=c.body, raw=text,
+                  parsed={"moves": [asdict(m) for m in got.moves],
+                          "opens": [asdict(o) for o in got.opens],
+                          "unresolved": [asdict(u) for u in got.unresolved],
+                          "dropped": list(got.dropped)},
+                  applied={}, seconds=round(time.time() - t0, 1))
+
+    물린것 = cases.carry(args.replay, 판)
+    print()
+    print(f"  형식 깨짐 {깨짐} · 앞 판 판정 {물린것}개를 물려받았다")
+    print(f"  python -m genie_agents cases {args.folder} --run {판}")
+    return 0
+
+
 def cmd_extract(args) -> int:
     """겹 1~3 을 한 번 돌린다(`docs/wiring.md` 5절).
 
     ★ **`--dry-run` 이 기본으로 쓰이는 자리다.** 무엇이 모델에 실릴지를 먼저
       눈으로 보라 — 팀원의 글이 밖으로 나가는 첫 자리가 여기다.
     """
+    import time
+    from dataclasses import asdict
+
     from .spec import BadSpec, load
 
     _settings(args.folder)
@@ -430,6 +484,7 @@ def cmd_extract(args) -> int:
         return 1
 
     from . import clock, env, extract as ex
+    from .cases import CaseBook, sha
     from .cursors import Cursors
     from .loops import LoopBook
     from .transcript import Book
@@ -440,6 +495,16 @@ def cmd_extract(args) -> int:
     root = Path(args.root) if args.root else spec.state_root
     book, loops = Book(root), LoopBook(root)
     me_id = args.me or env.get("SLACK_ME") or ""
+
+    if args.replay:
+        # ★ **슬랙을 안 본다.** 지침을 고칠 때마다 며칠을 다시 긁을 수는 없고,
+        #   무엇보다 같은 입력이어야 판끼리 비교가 된다. 입력이 흔들리면
+        #   나아진 것이 지침 덕인지 그날 대화 덕인지 못 가른다.
+        옛판 = CaseBook(root).run(args.replay)
+        if not 옛판:
+            print(f"✗ 그런 판이 없다: {args.replay}", file=sys.stderr)
+            return 1
+        return _replay(args, spec, root, 옛판)
 
     묶음 = ex.plan(book, me_id=me_id, rooms=tuple(spec.watch.get("slack") or ()))
     if not 묶음:
@@ -483,17 +548,34 @@ def cmd_extract(args) -> int:
     별칭 = ex.me_names(names, me_id)
     셈 = {"움직임": 0, "열림": 0, "못 씀": 0, "겹침": 0}
     못푼것 = []
+    cases = CaseBook(root)
+    판 = args.run or clock.local().strftime("%m%d-%H%M")
+    지침sha = sha(spec.extract)
+    print(f"  판 {판} · 지침 {지침sha}")
+
     for b in 묶음:
         # ★ **부르기 직전에 싣는다.** 미리 전부 직렬화해 두면 열린 고리 목록이
         #   *시작할 때의 것*으로 굳어서, 앞 묶음이 연 고리를 뒤 묶음이 못 본다.
         #   그러면 `moves` 가 가리킬 것이 영영 없고 — 실제로 첫 판에서
         #   움직임이 0이었다 — 목록은 자라기만 한다.
         body = ex.serialize(b, loops=loops.live(), names=names, me_id=me_id)
+        t0 = time.time()
         text = ex.ask(client, model, spec.extract, body)
+        걸린 = time.time() - t0
         got = ex.parse(text)
-        for k, v in ex.apply(got, loops, book, bundle=b,
-                             names=names, mine=별칭).items():
+        옮긴것 = ex.apply(got, loops, book, bundle=b, names=names, mine=별칭)
+        for k, v in 옮긴것.items():
             셈[k] += v
+        if args.record:
+            # ★ 켜야 남는다. `body` 에 팀원의 원문이 그대로 들어 있고,
+            #   `transcript` 의 72시간이 여기엔 안 걸린다(`cases.py`).
+            cases.add(run=판, prompt_sha=지침sha, room=b.room, thread=b.thread,
+                      keys=[x.key for x in b.lines], body=body, raw=text,
+                      parsed={"moves": [asdict(m) for m in got.moves],
+                              "opens": [asdict(o) for o in got.opens],
+                              "unresolved": [asdict(u) for u in got.unresolved],
+                              "dropped": list(got.dropped)},
+                      applied=옮긴것, seconds=round(걸린, 1))
         못푼것 += got.unresolved
         머리 = f"{b.room}" + (f"·{b.thread}" if b.thread else "")
         print(f"  {머리:<28} 움직임 {len(got.moves)} · 열림 {len(got.opens)}"
@@ -508,6 +590,85 @@ def cmd_extract(args) -> int:
         print(f"{chr(10)}  못 찾은 말 {len(못푼것)}개 — 저녁 목록에 이대로 올라간다")
         for u in 못푼것[:10]:
             print(f"    · \"{u.said}\" — {u.why}")
+    return 0
+
+
+def cmd_cases(args) -> int:
+    """판을 보고 **틀린 것만** 짚는다.
+
+    ★ 사람이 라벨을 짓지 않는다. 이 저장소의 첫 번째 원칙이 그거고
+      (`followup.md`: *"사람이 하는 일은 틀린 것을 한 번 눌러 고치는 것뿐이다"*),
+      평가도 같은 모양이어야 한다. 기본이 "맞음"이 아니라 **"아직 안 봄"**이고,
+      점수는 본 것 중에서만 낸다.
+    """
+    from .cases import RIGHT, WRONG, CaseBook
+    from .spec import BadSpec, load
+
+    _settings(args.folder)
+    try:
+        spec = load(args.folder)
+    except BadSpec as e:
+        print(f"✗ {e}", file=sys.stderr)
+        return 1
+
+    from . import env
+
+    env.use(spec.prefix)
+    root = Path(args.root) if args.root else spec.state_root
+    cases = CaseBook(root)
+
+    if args.mark:
+        cid, _, verdict = args.mark.partition("=")
+        verdict = verdict or WRONG
+        got = cases.mark(cid.strip(), verdict.strip(), args.note)
+        if got is None:
+            print(f"✗ 그런 판이 없다: {cid}", file=sys.stderr)
+            return 1
+        print(f"  {got.id} → {got.verdict}" + (f" · {got.note}" if got.note else ""))
+        return 0
+
+    판들 = cases.runs()
+    if not 판들:
+        print("  적어 둔 판이 없다 — `extract --record` 로 켜라")
+        return 0
+    이름 = args.run or 판들[-1]
+
+    if args.compare:
+        가, 나 = cases.score(args.compare), cases.score(이름)
+        print(f"  {가['판']}  →  {나['판']}")
+        for k in ("묶음", "본 것", "맞음", "정답률", "형식 깨짐"):
+            print(f"    {k:<8} {str(가[k]):>8}  →  {나[k]}")
+        for k in ("moves", "opens", "unresolved"):
+            print(f"    {k:<8} {가['낸 것'][k]:>8}  →  {나['낸 것'][k]}")
+        return 0
+
+    s = cases.score(이름)
+    print(f"  판 {s['판']} · 지침 {' '.join(s['지침'])}")
+    print(f"  묶음 {s['묶음']} · 본 것 {s['본 것']} · 맞음 {s['맞음']}"
+          + (f" · 정답률 {s['정답률']:.0%}" if s["정답률"] is not None else " · 정답률 —")
+          + f" · 형식 깨짐 {s['형식 깨짐']}")
+    print(f"  낸 것: {s['낸 것']}")
+    print()
+
+    안본것 = [c for c in cases.run(이름) if not c.seen]
+    보일것 = 안본것 if 안본것 and not args.all else cases.run(이름)
+    for c in 보일것[: args.limit or 10]:
+        표 = {"맞음": "○", "틀림": "✗"}.get(c.verdict, " ")
+        머리 = f"{c.room}" + (f"·{c.thread[:10]}" if c.thread else "")
+        print(f" {표} {c.id}  {머리:<26} {c.counts} {c.seconds:.0f}초"
+              + ("" if c.parsed else "  ★형식깨짐"))
+        for o in (c.parsed.get("opens") or [])[:3]:
+            print(f"      + [{o.get('owner', '')}] {str(o.get('text'))[:56]}")
+        for m in (c.parsed.get("moves") or [])[:2]:
+            print(f"      → {m.get('state')} {str(m.get('note'))[:52]}")
+        for u in (c.parsed.get("unresolved") or [])[:2]:
+            print(f"      ? {str(u.get('said'))[:52]}")
+
+    if 안본것 and not args.all:
+        print()
+        print(f"  아직 안 본 것 {len(안본것)}개. **틀린 것만** 짚으면 된다:")
+        print(f"    python -m genie_agents cases {args.folder} --mark {보일것[0].id} --note '왜'")
+        print(f"  맞은 것도 짚어야 정답률이 는다 — `--mark {보일것[0].id}=맞음`")
     return 0
 
 
@@ -568,12 +729,28 @@ def main(argv: list[str] | None = None) -> int:
     x.add_argument("--root", default="", help="어느 원장에 (기본 <폴더>/.<id>)")
     x.add_argument("--me", default="", help="본인 slack id. 멘션을 알아보려면 필요하다")
     x.add_argument("--names", default="", help="{id: 이름} JSON 파일")
+    x.add_argument("--run", default="", help="이 판의 이름 (기본 MMDD-HHMM)")
+    x.add_argument("--record", action="store_true",
+                   help="판을 cases.jsonl 에 적는다. ★ 팀원의 원문이 남는다")
+    x.add_argument("--replay", default="",
+                   help="그 판에 실렸던 묶음을 지금 지침으로 다시 돌린다 (슬랙 안 본다)")
     x.add_argument("--limit", type=int, default=0,
                    help="앞 N 묶음만. 지침을 고쳐 가며 볼 때")
     x.add_argument("--dry-run", action="store_true",
                    help="모델을 안 부르고 무엇이 실릴지만 본다")
     x.add_argument("--full", action="store_true", help="--dry-run 에서 본문까지 찍는다")
     x.set_defaults(fn=cmd_extract)
+
+    cs = sub.add_parser("cases", help="판을 보고 틀린 것을 짚는다")
+    cs.add_argument("folder")
+    cs.add_argument("--root", default="")
+    cs.add_argument("--run", default="", help="비우면 마지막 판")
+    cs.add_argument("--compare", default="", help="이 판과 견준다")
+    cs.add_argument("--mark", default="", help="<id> 또는 <id>=맞음")
+    cs.add_argument("--note", default="", help="왜 틀렸나 한 줄")
+    cs.add_argument("--all", action="store_true", help="본 것까지 전부")
+    cs.add_argument("--limit", type=int, default=0)
+    cs.set_defaults(fn=cmd_cases)
 
     args = p.parse_args(argv)
     return args.fn(args)
