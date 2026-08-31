@@ -144,6 +144,49 @@ def test_다시_묻기를_끄면_안_묻는다():
     assert t.requests == 1
 
 
+def test_글이_남아도_걷어낸_것이_있으면_알려주고_다시_묻는다():
+    """**떼기만 하면 모자란다.** 표시는 사라져도 "짠! 여기 있어" 는 남아서,
+    받는 쪽에서는 보낸다고 해놓고 안 온 것이 된다. 무엇이 일어났는지 알려주면
+    이번엔 도구를 부를 수도 있다."""
+    def 표시만(s):
+        return s.replace("[가짜]", "").strip(), (["[가짜]"] if "[가짜]" in s else [])
+
+    c = FakeClient(Resp([Text("짠! 여기 있어 [가짜]")]), Resp([Text("다시 쓴 답")]))
+    msgs = [{"role": "user", "content": "야"}]
+    t = loop.run(c, FakeSession(), msgs, model="m",
+                 policy=Policy(sanitizers=(표시만,), retry_note="그건 네가 적는 게 아니다"))
+
+    assert t.requests == 2, "한 번은 다시 물어야 한다"
+    assert t.text == "다시 쓴 답"
+    # 캐시 경계가 마지막 사용자 글을 블록으로 다시 싸므로 글자로 확인한다.
+    assert msgs[-1]["role"] == "user"
+    assert "그건 네가 적는 게 아니다" in str(msgs[-1]["content"])
+
+
+def test_알려줄_말이_없으면_안_묻는다():
+    """`retry_note` 가 비어 있으면 지금까지처럼 조용히 떼기만 한다."""
+    def 표시만(s):
+        return s.replace("[가짜]", "").strip(), (["[가짜]"] if "[가짜]" in s else [])
+
+    c = FakeClient(Resp([Text("짠! 여기 있어 [가짜]")]), Resp([Text("안 불려야 한다")]))
+    t = loop.run(c, FakeSession(), [{"role": "user", "content": "야"}], model="m",
+                 policy=Policy(sanitizers=(표시만,)))
+    assert t.requests == 1 and t.text == "짠! 여기 있어"
+
+
+def test_다시_묻는_것은_한_번뿐이다():
+    """`retry_when_empty` 와 **한 번을 나눠 쓴다.** 두 번 이상 걸리면 여기서
+    풀 문제가 아니고, 재시도가 그만큼 값을 태운다."""
+    def 표시만(s):
+        return s.replace("[가짜]", "").strip(), (["[가짜]"] if "[가짜]" in s else [])
+
+    c = FakeClient(Resp([Text("한 번 [가짜]")]), Resp([Text("두 번 [가짜]")]),
+                   Resp([Text("세 번")]))
+    t = loop.run(c, FakeSession(), [{"role": "user", "content": "야"}], model="m",
+                 policy=Policy(sanitizers=(표시만,), retry_note="그건 네가 적는 게 아니다"))
+    assert t.requests == 2 and t.text == "두 번"
+
+
 def test_판단_도구가_불리면_거기서_끝낸다():
     c = FakeClient(
         Resp([Use("1", "decide", {})], stop_reason="tool_use"),

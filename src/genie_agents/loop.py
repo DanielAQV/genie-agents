@@ -201,12 +201,23 @@ def run(
         tool_turn = turn.stop_reason == "tool_use"
 
         if chunks and (not tool_turn or policy.keep_text_with_tool_call):
+            before = len(turn.dropped)
             said = _clean("\n\n".join(chunks), policy, turn)
             turn.text = said
             # 다듬고 났더니 남는 게 없으면 한 번만 다시 묻는다.
             if not said and policy.retry_when_empty and not retried:
                 retried = True
                 print("  (말이 통째로 걷어낼 것뿐이라 한 번 다시 묻는다)", file=sys.stderr)
+                continue
+            # ★ **글은 남았는데 걷어낸 것이 있으면 알려주고 다시 묻는다.**
+            #   떼기만 하면 표시는 사라져도 "짠! 여기 있어" 는 남아서, 받는
+            #   쪽에서는 보낸다고 해놓고 안 온 것이 된다. 무엇이 실제로
+            #   일어났는지 알려주면 이번엔 도구를 부를 수도 있다.
+            if said and len(turn.dropped) > before and policy.retry_note and not retried:
+                retried = True
+                print("  (걷어낸 이유를 알려주고 한 번 다시 묻는다)", file=sys.stderr)
+                messages.append({"role": "assistant", "content": response.content})
+                messages.append({"role": "user", "content": policy.retry_note})
                 continue
 
         if turn.stop_reason == "pause_turn" and pauses < policy.max_pauses:
