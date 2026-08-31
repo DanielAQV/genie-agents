@@ -152,6 +152,58 @@ class MediaStore:
         return len(list(self.dir.glob("*"))) if self.dir.exists() else 0
 
 
+# 이보다 작으면 그냥 둔다. 줄이는 값(ffmpeg 한 번)이 아까운 크기다.
+SHRINK_FLOOR = 400 * 1024
+SHRINK_WIDTH = 1600  # 긴 변을 이만큼으로. 폰 화면에도 충분하고 확대해도 견딘다
+SHRINK_QUALITY = 3  # ffmpeg `-q:v`. 2 가 제일 좋고 31 이 제일 나쁘다
+SHRINK_TIMEOUT = 20
+
+
+def shrink(raw: bytes, mime: str) -> tuple[bytes, str]:
+    """사진을 방에 실을 만한 크기로. 못 줄이면 **원본 그대로 돌려준다.**
+
+    ★ **줄이다 실패했다고 사진이 사라지면 안 된다.** ffmpeg 이 없든, 형식이
+      낯설든, 시간이 걸리든 — 어느 쪽이든 원본을 그대로 돌려준다. 사진 한 장을
+      완벽하게 줄이는 것보다 사진이 가는 것이 먼저다.
+
+    사진만 줄인다. 소리와 영상은 안 건드린다 — 소리는 이미 작고(mp3 수백 KB),
+    영상은 다시 인코딩하는 값이 크고 무엇을 잃는지도 사진과 다르다.
+
+    이걸 `MediaStore.save` 안에 넣지 않은 이유: 저장은 **받은 것을 그대로 두는**
+    자리다(거기 주석에 그렇게 적혀 있다). 줄일지는 부르는 쪽이 정한다 —
+    사용자가 보낸 사진은 줄이고, 에이전트가 만든 사진은 만들 때 이미 줄인다.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    if not (mime or "").startswith("image/"):
+        return raw, mime
+    if len(raw) <= SHRINK_FLOOR or shutil.which("ffmpeg") is None:
+        return raw, mime
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src, dst = Path(tmp) / "in", Path(tmp) / "out.jpg"
+        src.write_bytes(raw)
+        try:
+            done = subprocess.run(
+                ["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", str(src),
+                 "-vf", f"scale='min({SHRINK_WIDTH},iw)':-2",
+                 "-q:v", str(SHRINK_QUALITY), str(dst)],
+                capture_output=True,
+                timeout=SHRINK_TIMEOUT,
+            )
+        except Exception:  # noqa: BLE001 — 줄이다 실패해도 사진은 남아야 한다
+            return raw, mime
+        if done.returncode != 0 or not dst.exists():
+            return raw, mime
+        small = dst.read_bytes()
+
+    # 줄였는데 더 커졌으면(작은 그림에서 그럴 수 있다) 원본이 낫다.
+    return (small, "image/jpeg") if 0 < len(small) < len(raw) else (raw, mime)
+
+
 def marker(item: Item) -> str:
     """본문에 붙는 표시. 스키마를 안 늘리고 여기에 실린다."""
     return f"[{item.label}:{item.id}]"
