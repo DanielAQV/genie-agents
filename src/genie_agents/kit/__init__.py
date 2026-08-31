@@ -16,11 +16,11 @@
 
 from __future__ import annotations
 
-from . import notes, reminders, world
+from . import loops, notes, reminders, world
 from ..tools import Tool
 
 CATALOG: dict[str, Tool] = {
-    t.name: t for t in (*reminders.TOOLS, *notes.TOOLS, *world.TOOLS)
+    t.name: t for t in (*reminders.TOOLS, *notes.TOOLS, *world.TOOLS, *loops.TOOLS)
 }
 
 __all__ = ["CATALOG"]

@@ -48,7 +48,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .clock import elapsed_minutes, now_iso
-from .store import JsonStore, default_root
+from .store import JsonStore, default_root, from_dict
 
 # 상태 넷. 더 늘리지 않는다 — 늘릴수록 "지금 뭐지" 를 사람이 판단하게 된다.
 OPEN = "열림"      # 내가 할 차례다
@@ -102,7 +102,8 @@ class Loop:
             id=d["id"], text=d["text"], owner=d["owner"], state=d["state"],
             source=d["source"], opened_at=d["opened_at"], moved_at=d["moved_at"],
             due=d.get("due", ""), sure=bool(d.get("sure", True)),
-            moves=[Move(**m) for m in d.get("moves", [])],
+            # `Move(**m)` 이면 필드가 하나 늘 때 옛 파일이 TypeError 로 죽는다.
+            moves=[from_dict(Move, m) for m in d.get("moves", [])],
         )
 
 
