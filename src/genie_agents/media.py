@@ -159,6 +159,58 @@ SHRINK_QUALITY = 3  # ffmpeg `-q:v`. 2 가 제일 좋고 31 이 제일 나쁘다
 SHRINK_TIMEOUT = 20
 
 
+# EXIF 방향(0x0112) → ffmpeg 필터. 폰은 사진을 가로로 저장하고 "돌려서 봐라"
+# 를 여기에 적는다. 다시 인코딩하면 그 표시가 날아가므로 **픽셀을 실제로 돌린다.**
+TURN = {
+    1: "",
+    2: "hflip",
+    3: "transpose=1,transpose=1",
+    4: "vflip",
+    5: "transpose=0",
+    6: "transpose=1",
+    7: "transpose=3",
+    8: "transpose=2",
+}
+
+
+def orientation(raw: bytes) -> int:
+    """EXIF 방향 표. 없거나 못 읽으면 1(안 돌림).
+
+    APP1 조각 하나만 본다. 라이브러리를 안 쓰는 이유는 이 저장소가 의존성을
+    안 늘리기 때문이고, 필요한 것이 태그 하나뿐이라서다.
+    """
+    try:
+        if raw[:2] != b"\xff\xd8":  # JPEG 이 아니면 볼 것이 없다
+            return 1
+        i = 2
+        while i + 4 <= len(raw):
+            if raw[i] != 0xFF:
+                return 1
+            marker, size = raw[i + 1], int.from_bytes(raw[i + 2 : i + 4], "big")
+            if marker == 0xE1 and raw[i + 4 : i + 10] == b"Exif\x00\x00":
+                tiff = i + 10
+                big = raw[tiff : tiff + 2] == b"MM"
+                order = "big" if big else "little"
+                off = int.from_bytes(raw[tiff + 4 : tiff + 8], order)
+                ifd = tiff + off
+                count = int.from_bytes(raw[ifd : ifd + 2], order)
+                for n in range(count):
+                    at = ifd + 2 + n * 12
+                    if int.from_bytes(raw[at : at + 2], order) == 0x0112:
+                        got = int.from_bytes(raw[at + 8 : at + 10], order)
+                        return got if got in TURN else 1
+                return 1
+            if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7:
+                i += 2
+                continue
+            if marker == 0xDA:  # 그림 자료 시작 — 여기부터는 태그가 없다
+                return 1
+            i += 2 + size
+    except Exception:  # noqa: BLE001 — 못 읽으면 안 돌린다
+        return 1
+    return 1
+
+
 def shrink(raw: bytes, mime: str) -> tuple[bytes, str]:
     """사진을 방에 실을 만한 크기로. 못 줄이면 **원본 그대로 돌려준다.**
 
@@ -166,12 +218,18 @@ def shrink(raw: bytes, mime: str) -> tuple[bytes, str]:
       낯설든, 시간이 걸리든 — 어느 쪽이든 원본을 그대로 돌려준다. 사진 한 장을
       완벽하게 줄이는 것보다 사진이 가는 것이 먼저다.
 
+    ★ **한 장만 쓴다**(`-frames:v 1`). 폰 사진에는 미리보기 프레임이 같이 들어
+      있고, 그걸 여러 장으로 본 ffmpeg 이 연속 파일을 쓰려다 실패한다. 실제로
+      6.5 MB 사진이 하나도 안 줄어들고 있었다(반환값 234).
+
+    ★ **방향을 지킨다.** 다시 인코딩하면 EXIF 표시가 날아가서 세로로 찍은
+      사진이 눕는다. 표시를 읽어 픽셀을 실제로 돌린다(`orientation`).
+
     사진만 줄인다. 소리와 영상은 안 건드린다 — 소리는 이미 작고(mp3 수백 KB),
     영상은 다시 인코딩하는 값이 크고 무엇을 잃는지도 사진과 다르다.
 
     이걸 `MediaStore.save` 안에 넣지 않은 이유: 저장은 **받은 것을 그대로 두는**
-    자리다(거기 주석에 그렇게 적혀 있다). 줄일지는 부르는 쪽이 정한다 —
-    사용자가 보낸 사진은 줄이고, 에이전트가 만든 사진은 만들 때 이미 줄인다.
+    자리다(거기 주석에 그렇게 적혀 있다). 줄일지는 부르는 쪽이 정한다.
     """
     import shutil
     import subprocess
@@ -183,13 +241,18 @@ def shrink(raw: bytes, mime: str) -> tuple[bytes, str]:
     if len(raw) <= SHRINK_FLOOR or shutil.which("ffmpeg") is None:
         return raw, mime
 
+    steps = [f"scale='min({SHRINK_WIDTH},iw)':-2"]
+    turn = TURN.get(orientation(raw), "")
+    if turn:
+        steps.append(turn)
+
     with tempfile.TemporaryDirectory() as tmp:
         src, dst = Path(tmp) / "in", Path(tmp) / "out.jpg"
         src.write_bytes(raw)
         try:
             done = subprocess.run(
                 ["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", str(src),
-                 "-vf", f"scale='min({SHRINK_WIDTH},iw)':-2",
+                 "-frames:v", "1", "-vf", ",".join(steps),
                  "-q:v", str(SHRINK_QUALITY), str(dst)],
                 capture_output=True,
                 timeout=SHRINK_TIMEOUT,
