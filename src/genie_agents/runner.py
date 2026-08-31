@@ -223,7 +223,8 @@ def check(root: Path | str) -> list[str]:
         # 로컬은 키가 아니라 **프로세스**가 없는 것이다. 고치는 길이 달라서
         # 말도 달라야 한다 — "키가 없다" 는 여기서 사람을 엉뚱한 데로 보낸다.
         problems.append(
-            f"로컬 모델이 안 떠 있다 ({local_url()}) — llama.cpp 서버를 띄워라"
+            f"로컬 모델이 안 떠 있다 ({local_url()})"
+            " — deploy/serve_local.py 나 llama.cpp 서버를 띄워라"
             if spec.adapter == "local"
             else f"{spec.adapter} 키가 없다 — 정의는 성하지만 못 뜬다"
         )

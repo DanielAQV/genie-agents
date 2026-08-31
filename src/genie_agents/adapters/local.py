@@ -123,7 +123,7 @@ class _Messages:
         except urllib.error.URLError as e:
             raise LocalUnavailable(
                 f"로컬 모델에 못 붙었다({self.endpoint}): {e.reason}. "
-                "llama.cpp 서버가 떠 있나"
+                "deploy/serve_local.py 나 llama.cpp 서버가 떠 있나"
             ) from None
         except (ValueError, UnicodeDecodeError) as e:
             raise LocalUnavailable(f"로컬 모델의 답을 못 읽었다: {e}") from None
