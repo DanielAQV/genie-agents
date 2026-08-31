@@ -505,7 +505,7 @@ def main(argv: list[str] | None = None) -> int:
 
     n = sub.add_parser("new", help="에이전트 틀을 만든다")
     n.add_argument("folder")
-    n.add_argument("--adapter", default="anthropic", choices=["anthropic", "gemini"])
+    n.add_argument("--adapter", default="anthropic", choices=["anthropic", "gemini", "local"])
     n.set_defaults(fn=cmd_new)
 
     c = sub.add_parser("check", help="띄우기 전에 본다 (키 없어도 돈다)")

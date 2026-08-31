@@ -179,8 +179,8 @@ def load(root: Path | str) -> Spec:
         raise BadSpec(f"id 는 글자·숫자·-·_ 만 쓴다: {ident!r}")
 
     adapter = str(a.get("adapter") or "").strip()
-    if adapter not in ("anthropic", "gemini"):
-        raise BadSpec(f"모르는 어댑터다: {adapter!r} (anthropic | gemini)")
+    if adapter not in ("anthropic", "gemini", "local"):
+        raise BadSpec(f"모르는 어댑터다: {adapter!r} (anthropic | gemini | local)")
 
     p = raw.get("prompt") or {}
     cast = raw.get("cast")
@@ -222,7 +222,7 @@ TEMPLATE = '''# 이 폴더 하나가 에이전트 하나다.
 
 [agent]
 id = "{id}"
-adapter = "{adapter}"        # anthropic | gemini
+adapter = "{adapter}"        # anthropic | gemini | local
 # model    = ""              # 안 적으면 어댑터 기본값
 # prefix   = "{prefix}"      # 환경변수 앞머리. 안 적으면 id 를 대문자로
 timezone = "Asia/Seoul"

@@ -13,6 +13,8 @@ dependencies = [
 [project.optional-dependencies]
 anthropic = ["anthropic>=0.40"]
 gemini = ["google-genai>=1.0"]
+# 로컬은 여기 없다 — **의존성이 하나도 안 붙는다.** urllib 한 겹으로
+# OpenAI 호환 엔드포인트(llama.cpp 서버 · vLLM · Ollama)에 붙는다.
 dev = ["pytest>=8.0"]
 
 [build-system]
