@@ -21,9 +21,39 @@ from genie_agents.messaging import peers   # 여럿이 서로 말할 때만
 genie_agents/
   store clock config env gate singleton talent
   usage world sources reminders media mailbox toolcontract
+  loops          열린 고리 원장 — 상태가 있고 언젠가 닫힌다
+  transcript     오간 말 그대로 — 묶음으로 꺼내고, 오래된 것은 버린다
+  cursors        어디까지 읽었나
+  wake           언제 스스로 말을 걸어도 되나 (`Nudge`)
+  spec runner    폴더 하나가 에이전트 하나 — 파이썬 없이 뜬다
+  kit/           켜면 바로 도는 도구 — reminders notes world loops
   messaging/     선택 — 방·멤버·메시지 스키마·배달
-  adapters/      모델을 갈아끼우는 자리
+  channels/      밖의 대화가 들어오는 자리 — slack
+  adapters/      모델을 갈아끼우는 자리 — anthropic gemini
 ```
+
+★ **자리가 둘로 갈려 있다.** `messaging/` 은 *대화하는* 자리(`Transport`)고
+`channels/` 의 관찰자는 *보는* 자리다. 섞으면 남의 말이 '나에게 온 메시지' 로
+루프에 들어가고, 그러면 에이전트가 남의 DM 에 끼어든다. 한 번이면 끝이다.
+
+## 명령줄
+
+```
+python -m genie_agents new   <폴더> [--adapter gemini]   틀을 만든다
+python -m genie_agents check <폴더>                      띄우기 전에 본다
+python -m genie_agents talk  <폴더> "..."                한 마디 걸어 본다
+python -m genie_agents wake  <폴더> [--kind 따라잡기]    깨어난다 (밖에서 부른다)
+python -m genie_agents rooms <폴더>                      방 id 를 찾는다
+```
+
+`check` 는 **키가 없어도 돈다.** 정의가 성한지와 키가 있는지는 다른 문제고,
+둘을 같이 물으면 키 없는 자리에서 정의를 못 고친다.
+
+`wake` 는 **한 번 돌고 끝난다.** 깨우는 것은 밖(작업 스케줄러·cron)이고 그것은
+놓친다 — 놓친 것을 따라잡는 자리가 `wake.pending` 이라 단발로도 성립한다.
+
+설정은 **그 폴더의 `.env`** 에서 읽는다. 현재 디렉토리가 아니다 — 한 호스트에
+에이전트 여럿이 살고, cwd 로 읽으면 어디서 불렀느냐에 따라 남의 토큰을 읽는다.
 
 ## 배역은 선언한다
 
