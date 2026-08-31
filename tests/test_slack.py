@@ -568,3 +568,25 @@ def test_ISO_와_slack_표기를_오간다():
     from genie_agents.channels.slack import epoch
 
     assert epoch(stamp("1756000000.000000")) == "1756000000.000000"
+
+
+# ── 그때인 척하기 ───────────────────────────────────────────────────
+def test_그때인_척할_때_천장이_걸린다(book, cursors):
+    """★ `at` 은 창의 바닥만이 아니라 **천장이기도 하다.** 전에는 `_since` 에만
+    걸려서 `at=8/15` 로 불러도 8/12~오늘을 긁어 왔다 — 그때인 척하는 것이
+    아니라 그냥 더 많이 긁는 것이었다. 리허설이 성립하려면 천장이 있어야 한다."""
+    fake = Fake(**{"conversations.history": lambda p: hist(msg(100, "말", thread="t1")),
+                   "conversations.replies": lambda p: hist()})
+    SlackWatch(fake.client(), rooms=("C01",)).catchup(book, cursors, at=T0)
+    부른것 = fake.calls("conversations.history")[0]
+    assert float(부른것["latest"]) == pytest.approx(T0.timestamp())
+    assert float(부른것["oldest"]) == pytest.approx(T0.timestamp() - 3 * 86400)
+    # 스레드도 같은 천장을 받는다 — 안 그러면 답글만 미래에서 온다
+    assert float(fake.calls("conversations.replies")[0]["latest"]) == pytest.approx(T0.timestamp())
+
+
+def test_at_을_안_주면_천장이_없다(book, cursors, frozen):
+    """실제로 돌 때는 지금까지 다 가져온다."""
+    fake = Fake(**{"conversations.history": lambda p: hist()})
+    SlackWatch(fake.client(), rooms=("C01",)).catchup(book, cursors)
+    assert fake.calls("conversations.history")[0].get("latest") in (None, "")

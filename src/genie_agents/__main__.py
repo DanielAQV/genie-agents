@@ -5,6 +5,7 @@
     python -m genie_agents talk  <폴더> "..."               한 마디 걸어 본다
     python -m genie_agents wake  <폴더> [--kind 따라잡기]   깨어난다 (밖에서 부른다)
     python -m genie_agents rooms <폴더>                     방 id 를 찾는다 (한 번 쓰고 만다)
+    python -m genie_agents rehearse <폴더> --from … --to …  며칠 전인 척 다시 돌린다
 
 ★ 설정은 **그 폴더의 `.env`** 에서 읽는다(`<폴더>/.env`). 현재 디렉토리가 아니다 —
   한 호스트에 에이전트 여럿이 살고, cwd 로 읽으면 **어디서 불렀느냐에 따라 남의
@@ -292,6 +293,116 @@ def cmd_rooms(args) -> int:
     return 0
 
 
+def cmd_rehearse(args) -> int:
+    """며칠 전인 척하고 하루씩 다시 돌린다.
+
+    ★ **연휴 때문에 만든 것이 아니다.** 4단계 추출은 프롬프트를 고치고 다시
+      돌려 보는 일의 반복인데, 그때마다 하루를 기다릴 수는 없다. 같은 며칠을
+      몇 번이고 다시 돌릴 수 있어야 그 일이 성립한다.
+
+    ★ **진짜 자리를 안 건드린다.** 상태는 `--root`(기본 `<폴더>/.rehearsal`)로
+      간다. 리허설이 커서를 밀어 버리면 진짜 원장이 그 창을 영영 못 본다.
+
+    ★ 리허설 자리에도 **팀원의 말이 그대로 쌓인다.** 다 쓰면 지워라 —
+      보존 결정은 `.followup/` 에만 걸려 있고 여기는 그 밖이다.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from .spec import BadSpec, load
+
+    _settings(args.folder)
+    try:
+        spec = load(args.folder)
+    except BadSpec as e:
+        print(f"✗ {e}", file=sys.stderr)
+        return 1
+
+    from . import clock, env
+    from .channels import catchup
+    from .cursors import Cursors
+    from .transcript import Book
+
+    env.use(spec.prefix)
+    clock.set_default(spec.prefix, spec.timezone, spec.utc_offset)
+
+    def 날(s: str) -> datetime:
+        d = datetime.fromisoformat(s)
+        return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+    try:
+        시작, 끝 = 날(args.since), 날(args.until)
+    except ValueError as e:
+        print(f"✗ 날짜를 못 읽었다: {e} (2026-08-20 또는 2026-08-20T18:00)", file=sys.stderr)
+        return 1
+    if 시작 > 끝:
+        print("✗ --from 이 --to 보다 뒤다", file=sys.stderr)
+        return 1
+
+    root = Path(args.root) if args.root else spec.state_root.with_name(".rehearsal")
+    if args.fresh:
+        import shutil
+
+        shutil.rmtree(root, ignore_errors=True)
+    book, cursors = Book(root), Cursors(root)
+
+    print(f"  {root}  ·  {시작:%Y-%m-%d %H:%M} → {끝:%Y-%m-%d %H:%M}"
+          f"  ({args.step}시간씩" + (", 안 버림)" if args.no_prune else ")"))
+
+    진짜시계 = clock.now
+    걸음, 그때 = 0, 시작
+    try:
+        while 그때 <= 끝:
+            # 시계까지 민다. `at` 을 전부 꿰어 두긴 했지만, 한 군데라도
+            # 진짜 지금을 읽으면 리허설이 조용히 틀린다.
+            clock.set_clock(lambda 순간=그때: 순간)
+            got = catchup(spec, book=book, cursors=cursors, at=그때,
+                          prune=not args.no_prune)
+            방 = {k: v for k, v in got.items() if not k.startswith("_")}
+            if any(방.values()) or args.verbose:
+                print(f"  {그때:%m-%d %H:%M}  "
+                      + " · ".join(f"{k} {v}" for k, v in 방.items()))
+            for k, v in got.items():
+                if k.startswith("_"):
+                    print(f"           {k[1:]} — {v}")
+            걸음 += 1
+            그때 += timedelta(hours=args.step)
+    finally:
+        clock.set_clock(진짜시계)
+
+    print()
+    print(f"  {걸음}번 깨어난 셈 · 원장 {len(book)}줄")
+    for room in book.rooms():
+        ls = book.lines(room)
+        mine = sum(1 for x in ls if x.mine)
+        th = book.threads(room)
+        답글 = sum(1 for x in ls if x.thread)
+        print(f"    {room:<13} {len(ls):>4}줄 · 내 말 {mine:>3} · 스레드 {len(th):>2}"
+              f" · 스레드 안 {답글:>3}")
+
+    print()
+    print("  묶음 — 4단계가 모델에 실을 단위다")
+    잰것 = []
+    for room in book.rooms():
+        for t in book.threads(room):
+            잰것.append(("스레드", room, book.bundle(room, thread=t)))
+        잰것.append(("창", room, book.bundle(room)))
+    잰것 = [(k, r, b) for k, r, b in 잰것 if len(b)]
+    if not 잰것:
+        print("    (없다)")
+        return 0
+    글자 = sorted(sum(len(x.text) for x in b.lines) for _, _, b in 잰것)
+    줄 = sorted(len(b) for _, _, b in 잰것)
+
+    def 백분위(xs, p):
+        return xs[min(len(xs) - 1, int(len(xs) * p))]
+
+    print(f"    {len(잰것)}묶음 · 줄 중앙 {백분위(줄, .5)} · p95 {백분위(줄, .95)} · 최대 {줄[-1]}")
+    print(f"             글자 중앙 {백분위(글자, .5):,} · p95 {백분위(글자, .95):,} · 최대 {글자[-1]:,}")
+    print(f"    ★ 토큰은 이보다 적다(한국어·베트남어 섞여 대략 글자의 0.6~0.9배).")
+    print(f"      정확한 수는 실제 토크나이저로 재야 한다 — 이 수가 6GB 학습의 seq len 을 정한다.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="genie_agents", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -331,6 +442,18 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--all", action="store_true",
                    help="앱 DM·퇴사자 DM 까지 전부 (기본은 사람 DM 만)")
     r.set_defaults(fn=cmd_rooms)
+
+    h = sub.add_parser("rehearse", help="며칠 전인 척 다시 돌린다 (진짜 자리는 안 건드린다)")
+    h.add_argument("folder")
+    h.add_argument("--from", dest="since", required=True, help="2026-08-20")
+    h.add_argument("--to", dest="until", required=True, help="2026-08-28")
+    h.add_argument("--step", type=float, default=24, help="몇 시간씩 (기본 24)")
+    h.add_argument("--root", default="", help="상태 자리 (기본 <폴더>/.rehearsal)")
+    h.add_argument("--fresh", action="store_true", help="그 자리를 먼저 비운다")
+    h.add_argument("--no-prune", action="store_true",
+                   help="안 버린다. 재는 동안 버리면 잴 것이 없다")
+    h.add_argument("--verbose", action="store_true", help="0줄인 걸음도 찍는다")
+    h.set_defaults(fn=cmd_rehearse)
 
     args = p.parse_args(argv)
     return args.fn(args)

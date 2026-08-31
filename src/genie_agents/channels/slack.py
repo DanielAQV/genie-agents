@@ -263,16 +263,21 @@ class SlackWatch:
 
     # --- 긁기 ---
 
-    def history(self, room: str, oldest: str = "") -> list[Line]:
-        """그 방의 새 말. **페이지를 끝까지 판다.**"""
+    def history(self, room: str, oldest: str = "", latest: str = "") -> list[Line]:
+        """그 방의 새 말. **페이지를 끝까지 판다.**
+
+        `latest` 는 **그때인 척하는 자리**다. 안 주면 지금까지.
+        """
         got = []
-        for msg in self.slack.paged("conversations.history", channel=room, oldest=oldest):
+        for msg in self.slack.paged("conversations.history", channel=room,
+                                    oldest=oldest, latest=latest):
             line = self.line(room, msg)
             if line is not None:
                 got.append(line)
         return got
 
-    def replies(self, room: str, thread: str, since: str = "") -> list[Line]:
+    def replies(self, room: str, thread: str, since: str = "",
+                latest: str = "") -> list[Line]:
         """스레드 하나. `since`(ISO)를 주면 그 뒤에 붙은 것만.
 
         ★ `since` 를 주는 쪽이 **원글을 이미 들고 있는지 확인해야 한다.**
@@ -281,7 +286,8 @@ class SlackWatch:
         """
         got = []
         for msg in self.slack.paged("conversations.replies", channel=room, ts=thread,
-                                    oldest=epoch(since) if since else ""):
+                                    oldest=epoch(since) if since else "",
+                                    latest=latest):
             line = self.line(room, msg, thread_hint=thread)
             if line is not None:
                 got.append(line)
@@ -309,11 +315,17 @@ class SlackWatch:
           토큰 하나가 한 방에만 없는 일이 실제로 있다 — 안 부른 단톡방 하나 때문에
           DM 두 자리가 통째로 안 들어오면 그날 원장이 통째로 빈다.
         """
+        # ★ **`at` 은 창의 바닥만이 아니라 천장이기도 하다.** 전에는 `_since`
+        #   에만 걸려서 `at=8/15` 로 불러도 8/12~**오늘**을 긁어 왔다 — 그때인
+        #   척하는 것이 아니라 그냥 더 많이 긁는 것이었다. 리허설이 성립하려면
+        #   천장이 있어야 한다.
+        천장 = epoch(at.isoformat() if hasattr(at, "isoformat") else at) if at else ""
+
         새것: dict[str, int] = {}
         for room in self.rooms:
             try:
                 oldest = self._since(room, cursors, at)
-                lines = self.history(room, oldest)
+                lines = self.history(room, oldest, latest=천장)
                 끝 = max((parse_key(x.key)[1] for x in lines), default="")
 
                 # ★ **순서가 있는 목록이어야 한다.** 집합으로 모아 `[:상한]` 을
@@ -326,7 +338,7 @@ class SlackWatch:
                 볼스레드: list[str] = []
                 본것: set[str] = set()
                 for t in ([x.thread for x in lines if x.thread]
-                          + book.threads(room, newer_than_days=self.thread_days)):
+                          + book.threads(room, newer_than_days=self.thread_days, at=at)):
                     if t not in 본것:
                         본것.add(t)
                         볼스레드.append(t)
@@ -341,7 +353,9 @@ class SlackWatch:
                     #   답글만 쌓이면 묶음이 가리키는 대상을 잃는다.
                     있다 = book.get(key_of(room, thread)) is not None
                     lines += self.replies(
-                        room, thread, since=book.thread_at(room, thread) if 있다 else "")
+                        room, thread,
+                        since=book.thread_at(room, thread) if 있다 else "",
+                        latest=천장)
 
                 새것[room] = book.put_many(lines)
                 cursors.set(f"slack:{room}", 끝)   # ★ 쌓은 뒤에

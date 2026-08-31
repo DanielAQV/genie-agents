@@ -25,7 +25,7 @@ from .. import env
 __all__ = ["catchup"]
 
 
-def catchup(spec, *, book=None, cursors=None, at=None) -> dict:
+def catchup(spec, *, book=None, cursors=None, at=None, prune: bool = True) -> dict:
     """`[watch]` 에 적힌 자리를 한 번씩 긁는다. 자리마다 새로 들어온 개수.
 
     **말하지 않는다. 쌓기만 한다.** 판단은 깨어날 때다(`wake.CATCHUP`).
@@ -65,8 +65,10 @@ def catchup(spec, *, book=None, cursors=None, at=None) -> dict:
 
     # ★ 긁은 뒤에 버린다. §9 의 "원문은 따라잡기 창만" 이 도는 자리다.
     #   값이 `agent.toml` 에 있어야 **이 사람이 얼마를 남기기로 했는지가 기록**이 된다.
+    # 리허설에서는 안 버릴 수 있다. **재는 동안 버리면 잴 것이 없다** —
+    # 묶음 길이를 재려고 며칠치를 다시 돌리는 자리가 그렇다.
     지운수 = book.prune(hours=float(w.get("keep_hours", 72)), at=at,
-                       thread_days=float(w.get("keep_thread_days", 30)))
+                       thread_days=float(w.get("keep_thread_days", 30))) if prune else 0
     if 지운수:
         got["_버린 원문"] = 지운수
     return got
