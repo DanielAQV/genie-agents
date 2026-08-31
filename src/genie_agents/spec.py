@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .policy import Policy
+from .wake import Nudge
 
 FILE = "agent.toml"
 
@@ -47,6 +48,8 @@ class Spec:
     instructions: str
     identity: str
     policy: Policy
+    nudge: Nudge
+    """부르지 않았는데 말하는 것의 상한. 안 적으면 골격 기본값이다."""
     gated: tuple[str, ...]
     tools_module: str
     enabled: tuple[str, ...] = field(default_factory=tuple)
@@ -54,6 +57,17 @@ class Spec:
     describe: dict = field(default_factory=dict)
     """설명문을 갈아 끼운 것. **말투가 곧 인격이라** 그 존재가 정한다."""
     cast: dict | None = field(default=None)
+    watch: dict = field(default_factory=dict)
+    """**보는 자리** — 어느 방을 읽나. 대화하는 자리(`cast`)와 다른 것이다.
+
+    ★ 섞으면 남의 말이 '나에게 온 메시지' 로 루프에 들어간다
+      (`channels/__init__.py`). `cast.rooms` 는 봇이 말하는 방이고, 여기는
+      봇이 **말하지 않고 읽기만** 하는 방이다.
+
+    ★ 무엇을 읽을지를 값으로 올려 두는 것 자체가 결정이다 — *"읽는 범위를
+      좁힌 것이 결정이다"*(`followup.md`). 코드에 방 id 가 박히면 그 결정이
+      어디서 났는지 아무도 못 찾는다.
+    """
 
     @property
     def state_root(self) -> Path:
@@ -76,6 +90,26 @@ def _text(root: Path, name: str, what: str, required: bool) -> str:
         # 안 쓸 거면 그 줄을 지우면 된다.
         raise BadSpec(f"{what} 가 없다: {p} (안 쓸 거면 {FILE} 에서 그 줄을 지워라)")
     return p.read_text(encoding="utf-8").strip()
+
+
+def _nudge(raw: dict) -> Nudge:
+    """적힌 것만 바꾼다. `quiet` 는 TOML 에서 배열로 오므로 짝으로 굳힌다."""
+    known = set(Nudge.__dataclass_fields__)
+    unknown = set(raw) - known
+    if unknown:
+        raise BadSpec(
+            f"모르는 상한 칸이다: {sorted(unknown)} (아는 것: {', '.join(sorted(known))})"
+        )
+    got = dict(raw)
+    if "quiet" in got:
+        q = got["quiet"]
+        if len(q) != 2:
+            raise BadSpec(f"quiet 는 [시작, 끝] 둘이다: {q}")
+        got["quiet"] = (str(q[0]), str(q[1]))
+    try:
+        return Nudge(**got)
+    except (ValueError, TypeError) as e:
+        raise BadSpec(f"[nudge] 가 잘못됐다: {e}") from None
 
 
 def _policy(raw: dict) -> Policy:
@@ -103,6 +137,8 @@ _SECTIONS = {
     "agent": {"id", "prefix", "adapter", "model", "timezone", "utc_offset"},
     "prompt": {"instructions", "identity"},
     "tools": {"module", "gated", "enable", "describe"},
+    "nudge": set(Nudge.__dataclass_fields__),
+    "watch": {"slack", "first_days", "thread_days", "keep_hours", "keep_thread_days"},
 }
 
 
@@ -163,11 +199,13 @@ def load(root: Path | str) -> Spec:
         instructions=_text(root, str(p.get("instructions") or ""), "지침", required=True),
         identity=_text(root, str(p.get("identity") or ""), "정체성", required=False),
         policy=_policy(raw.get("policy") or {}),
+        nudge=_nudge(raw.get("nudge") or {}),
         gated=tuple(t.get("gated") or ()),
         tools_module=str(t.get("module") or ""),
         enabled=tuple(t.get("enable") or ()),
         describe=dict(t.get("describe") or {}),
         cast=cast,
+        watch=dict(raw.get("watch") or {}),
     )
 
 
@@ -212,4 +250,30 @@ enable = ["reminder_set", "reminder_done", "reminder_list", "note_write", "note_
 # humans = ["owner"]
 # [cast.rooms]
 # "{id}-owner" = ["{id}", "owner"]
+
+# **보는 자리** — 읽기만 하는 방들. 봇이 말하는 방([cast])과 갈라 둔다.
+# 섞으면 남의 말이 '나에게 온 메시지'로 루프에 들어간다.
+# [watch]
+# slack       = ["C0123", "D0456"]  # 채널 id. 이름이 아니라 id 다
+# first_days  = 3                   # 커서가 없는 첫 날 거슬러 올라가는 날수
+# thread_days = 3                   # 이만큼 안에 움직인 스레드는 다시 파 본다
+#
+# ★ 남기는 값 둘. **이 두 줄이 곧 "무엇을 얼마나 남기나" 의 답이다.**
+# keep_hours       = 72   # 원문(오간 말 그대로)
+# keep_thread_days = 30   # 스레드 자국(id·시각만, 글은 안 남는다)
+#
+# ★ 셋째 층이 있는데 여기 없다 — `loops.json` 은 **안 지운다**(loops.py:
+#   "닫힌 고리가 곧 한 일이다"). 고리 본문은 남의 말에서 뽑은 문장이라,
+#   원문을 사흘에 버려도 **옮겨 적힌 것은 영영 남는다.** 알고 두는 것이다.
+
+# 부르지 않았는데 말할 때의 **상한**이다. 말할지 말지의 판단은 여기가 아니라
+# [policy] decision_tools 가 든다 — 판단과 상한을 갈라 둔다.
+# 스스로 안 깨어나는 에이전트는 이 절이 없어도 된다.
+# [nudge]
+# morning         = "로그온"        # 또는 "08:30". 상시가 아닌 기계에서는 시각이 뜻이 없다
+# evening         = "18:00"
+# quiet           = ["22:00", "07:00"]   # 이 사이엔 아무것도 안 간다
+# max_per_day     = 3
+# min_gap_minutes = 180
+# carry_over      = true            # 못 낸 것을 버리지 않고 다음에 낸다
 '''

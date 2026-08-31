@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  깨어남을 밖에서 부른다 — Windows 작업 스케줄러.
+
+  `deploy/install-task.ps1` 이 {{...}} 를 채워 등록한다. 손으로 고칠 일이
+  있으면 이 파일을 고치고 그 스크립트를 다시 돌려라.
+
+  ━━ 왜 작업이 셋이 아니라 하나인가 ━━
+
+  `docs/wiring.md` 2절은 처음에 셋(catchup·morning·evening)으로 적었는데,
+  코드를 짜 보니 셋이 **같은 일을 한다.** 무엇을 낼지는 트리거가 아니라
+  `Wake.batch()` 가 정하기 때문이다(밀린 것을 찾아 합쳐 낸다).
+
+  ★ 트리거는 *언제 도는가*만 정하고, *무엇을 내는가*는 `Nudge` 가 정한다.
+    그 둘을 갈라 두기로 한 이상 **트리거를 종류마다 두면 같은 말을 두 군데서
+    하는 것**이다. 하나로 두고 트리거만 셋 건다.
+
+  ━━ 이 파일에서 제일 중요한 한 줄 ━━
+
+  ★ <StartWhenAvailable>true</StartWhenAvailable>
+    PC 가 꺼져 있어서 못 돈 것을 켜자마자 돌린다. 회사 PC 는 주말마다 이틀,
+    연휴엔 닷새 꺼진다 — 이게 없으면 그 날짜의 저녁이 **영영 안 온다.**
+
+  ━━ 안 켜 둔 것 ━━
+
+  · WakeToRun=false   — 자는 기계를 깨우지 않는다. 하루 두 번 말하는 물건이
+                        사람을 대신해 컴퓨터를 깨울 이유가 없다.
+  · RunLevel          — 관리자로 안 돈다. 파일 몇 개와 HTTPS 가 전부다.
+-->
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>{{ID}} — 깨어남 한 번. 밀린 것이 있으면 낸다.</Description>
+    <URI>\{{TASKNAME}}</URI>
+  </RegistrationInfo>
+
+  <Triggers>
+    <!-- 아침. 시각이 아니라 **사람이 그 앞에 앉은 순간**이다.
+         3분 늦추는 것은 로그온 직후 디스크·네트워크가 붐비기 때문. -->
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>{{USER}}</UserId>
+      <Delay>PT3M</Delay>
+    </LogonTrigger>
+
+    <!-- 따라잡기. 근무시간에 매시. 낼 것이 없으면 조용히 끝난다. -->
+    <CalendarTrigger>
+      <Enabled>true</Enabled>
+      <StartBoundary>2026-01-01T09:00:00</StartBoundary>
+      <Repetition>
+        <Interval>PT1H</Interval>
+        <Duration>PT10H</Duration>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
+      <ScheduleByDay>
+        <DaysInterval>1</DaysInterval>
+      </ScheduleByDay>
+    </CalendarTrigger>
+
+    <!-- 저녁. 이 시각이 지나면 저녁이 '밀린 것'이 된다(Nudge.evening 와 맞춘다). -->
+    <CalendarTrigger>
+      <Enabled>true</Enabled>
+      <StartBoundary>2026-01-01T18:00:00</StartBoundary>
+      <ScheduleByDay>
+        <DaysInterval>1</DaysInterval>
+      </ScheduleByDay>
+    </CalendarTrigger>
+  </Triggers>
+
+  <Principals>
+    <Principal id="Author">
+      <UserId>{{USER}}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+
+  <Settings>
+    <!-- ★ 놓친 것을 켜자마자 돌린다. 이 파일에서 제일 중요한 한 줄이다. -->
+    <StartWhenAvailable>true</StartWhenAvailable>
+
+    <!-- 겹치면 새것을 버린다. 돌고 있는 쪽이 어차피 같은 일을 한다.
+         `singleton` 이 프로세스 쪽에서도 한 번 더 막는다 — 스케줄러만 믿지 않는다. -->
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+
+    <!-- 노트북에서 배터리로 돌아도 돈다. 몇 초짜리 일이다. -->
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+
+    <!-- 네트워크가 막히면 매달리지 않고 끊는다. 다음 시각에 또 온다. -->
+    <ExecutionTimeLimit>PT10M</ExecutionTimeLimit>
+
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <WakeToRun>false</WakeToRun>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+  </Settings>
+
+  <Actions Context="Author">
+    <Exec>
+      <!-- pythonw.exe 다. python.exe 면 매시 검은 창이 깜빡인다 —
+           하루 열 번 깜빡이는 물건은 사람이 먼저 꺼 버린다. -->
+      <Command>{{PYTHONW}}</Command>
+      <Arguments>-m genie_agents wake "{{FOLDER}}"</Arguments>
+      <WorkingDirectory>{{WORKDIR}}</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>

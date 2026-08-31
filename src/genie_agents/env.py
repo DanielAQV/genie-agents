@@ -37,15 +37,22 @@ def use(name: str) -> None:
     os.environ.setdefault(VAR, name.strip().upper())
 
 
-def key(name: str) -> str:
-    """`WAKE_MIN_MINUTES` → `{프리픽스}_WAKE_MIN_MINUTES`."""
-    p = prefix()
+def key(name: str, 프리픽스: str = "") -> str:
+    """`WAKE_MIN_MINUTES` → `{프리픽스}_WAKE_MIN_MINUTES`.
+
+    ★ 프리픽스를 **손으로 주는 자리가 하나** 있다 — `check` 다. 거기는
+      `env.use` 를 안 부른다(정의가 성한지 보는 자리이지 그 에이전트로 사는
+      자리가 아니다). 그런데 프리픽스 없이 이름을 만들면 **있는 토큰을 없다고
+      말한다** — 실제로 그렇게 한 번 틀렸다. `check` 가 거짓말을 하면 그 다음에
+      사람은 `check` 를 안 본다.
+    """
+    p = (프리픽스 or prefix()).strip().upper()
     return f"{p}_{name}" if p else name
 
 
-def get(name: str, default: str | None = None) -> str | None:
+def get(name: str, default: str | None = None, 프리픽스: str = "") -> str | None:
     """프리픽스를 붙여 읽는다."""
-    return os.environ.get(key(name), default)
+    return os.environ.get(key(name, 프리픽스), default)
 
 
 def num(name: str, default: float) -> float:

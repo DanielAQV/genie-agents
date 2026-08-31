@@ -277,3 +277,106 @@ def test_모르는_칸은_절마다_걸린다(tmp_path):
     """`timezon` 하나 잘못 적으면 조용히 UTC 로 돈다. 몇 주 뒤에 발견된다."""
     with pytest.raises(BadSpec, match=r"\[agent\] 이 모르는 칸"):
         load(folder(tmp_path, TOML.replace("timezone =", "timezon =")))
+
+
+# ── 보는 자리 ────────────────────────────────────────────────────────
+WATCH = '\n[watch]\nslack = ["C0123", "D0456"]\nkeep_hours = 48\n'
+
+
+def test_보는_자리를_값으로_읽는다(tmp_path):
+    """★ 코드에 방 id 가 박히면 *"읽는 범위를 좁힌 것이 결정이다"* 가
+    어디서 났는지 아무도 못 찾는다."""
+    s = load(folder(tmp_path, TOML + WATCH))
+    assert s.watch["slack"] == ["C0123", "D0456"]
+    assert s.watch["keep_hours"] == 48
+
+
+def test_안_적으면_보는_자리가_없다(tmp_path):
+    """읽기는 켜야 도는 것이다. 기본이 "다 읽는다" 면 안 된다."""
+    assert load(folder(tmp_path)).watch == {}
+
+
+def test_모르는_보는_자리_칸은_걸린다(tmp_path):
+    with pytest.raises(BadSpec, match=r"\[watch\] 이 모르는 칸"):
+        load(folder(tmp_path, TOML + '\n[watch]\nslak = ["C1"]\n'))
+
+
+def test_토큰이_없으면_check_가_짚는다(clean, tmp_path):
+    """★ 읽는 자리가 안 열리는 것은 **조용한 고장**이다 — 아무 말도 안 하고
+    원장만 안 찬다. `check` 는 키가 없어도 도는 자리라 여기서 짚는다."""
+    clean.delenv("SCRIBE_SLACK_USER_TOKEN", raising=False)
+    got = runner.check(folder(tmp_path, TOML + WATCH))
+    assert any("SLACK_USER_TOKEN" in p for p in got), got
+
+
+def test_방을_이름으로_적으면_짚는다(clean, tmp_path):
+    """`#개발` 로 적으면 `channel_not_found` 가 회사 PC 에서 밤에 난다."""
+    clean.setenv("SCRIBE_SLACK_USER_TOKEN", "xoxp-x")
+    got = runner.check(folder(tmp_path, TOML + '\n[watch]\nslack = ["#개발"]\n'))
+    assert any("채널 **id**" in p for p in got), got
+
+
+def test_프리픽스_붙은_토큰을_찾아낸다(clean, tmp_path):
+    """★ `check` 는 `env.use` 를 안 부르는 자리다. 접두사 없이 찾으면 **있는
+    토큰을 없다고 말한다** — `check` 가 한 번 거짓말하면 그 다음부터 사람은
+    `check` 를 안 본다."""
+    clean.setenv("SCRIBE_SLACK_USER_TOKEN", "xoxp-x")
+    got = runner.check(folder(tmp_path, TOML + WATCH))
+    assert not any("SLACK_USER_TOKEN" in p for p in got), got
+
+
+def test_env_는_그_폴더에서_읽는다(clean, tmp_path):
+    """★ cwd 가 아니라 `<폴더>/.env` 다. 한 호스트에 에이전트 여럿이 살고,
+    cwd 로 읽으면 **어디서 불렀느냐에 따라 남의 토큰을 읽는다.**"""
+    from genie_agents.config import load_env
+
+    d = folder(tmp_path, TOML + WATCH)
+    (d / ".env").write_text("SCRIBE_SLACK_USER_TOKEN=xoxp-여기있다\n", encoding="utf-8")
+    clean.delenv("SCRIBE_SLACK_USER_TOKEN", raising=False)
+    try:
+        load_env(d / ".env")
+        assert not any("SLACK_USER_TOKEN" in p for p in runner.check(d))
+    finally:
+        os.environ.pop("SCRIBE_SLACK_USER_TOKEN", None)
+
+
+def test_봇_토큰을_넣으면_짚는다(clean, tmp_path):
+    """★ **제일 하기 쉬운 실수다.** Slack CLI 로 앱을 만들면 손에 먼저 잡히는
+    것이 봇 토큰(xoxb-)이고, 그걸로는 팀원 DM 이 한 줄도 안 보인다.
+    에러도 안 난다 — **빈 방으로 보일 뿐이다.** 그게 제일 나쁜 고장이다."""
+    clean.setenv("SCRIBE_SLACK_USER_TOKEN", "xoxb-봇이다")
+    got = runner.check(folder(tmp_path, TOML + WATCH))
+    assert any("봇 토큰" in p for p in got), got
+
+
+def test_방이_비어_있으면_짚는다(clean, tmp_path):
+    """★ 켜 놓고 방이 없으면 **아무 말 없이 아무것도 안 한다.** 매시 깨어나서
+    빈 손으로 돌아오는 것을 사람은 몇 주 뒤에나 눈치챈다."""
+    got = runner.check(folder(tmp_path, TOML + "\n[watch]\nslack = []\n"))
+    assert any("보는 방이 없다" in p for p in got), got
+
+
+def test_남기는_값_둘을_따로_읽는다(tmp_path):
+    """★ 원문과 스레드 자국은 **다른 것을 남긴다.** 하나로 묶으면 "글은
+    사흘, 자국은 한 달" 이라는 결정 자체를 적을 자리가 없어진다."""
+    s = load(folder(tmp_path, TOML + '\n[watch]\nslack = ["C1"]\n'
+                    'keep_hours = 48\nkeep_thread_days = 14\n'))
+    assert s.watch["keep_hours"] == 48
+    assert s.watch["keep_thread_days"] == 14
+
+
+def test_봇_칸에_사용자_토큰이_들어가면_짚는다(clean, tmp_path):
+    """★ 사용자 토큰으로 말하면 **본인이 친 것으로 보인다.** 팀원이 사람과
+    봇을 구분 못 하게 되고, 그건 되돌릴 수 없다(wiring.md §1).
+
+    5단계에 가서 보면 늦다 — 그때 이 값은 몇 주 전에 넣어 둔 것이다."""
+    clean.setenv("SCRIBE_SLACK_USER_TOKEN", "xoxp-사용자")
+    clean.setenv("SCRIBE_SLACK_BOT_TOKEN", "xoxp-이것도사용자")
+    got = runner.check(folder(tmp_path, TOML + WATCH))
+    assert any("본인이 친 것으로 보인다" in p for p in got), got
+
+
+def test_봇_토큰이_성하면_아무_말_안_한다(clean, tmp_path):
+    clean.setenv("SCRIBE_SLACK_USER_TOKEN", "xoxp-사용자")
+    clean.setenv("SCRIBE_SLACK_BOT_TOKEN", "xoxb-봇")
+    assert not any("BOT_TOKEN" in p for p in runner.check(folder(tmp_path, TOML + WATCH)))

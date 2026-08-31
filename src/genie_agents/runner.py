@@ -51,7 +51,12 @@ class KitSession:
     """
 
     def __init__(self, spec: Spec) -> None:
-        from . import notes as _notes, reminders as _reminders, world as _world
+        from . import (
+            loops as _loops,
+            notes as _notes,
+            reminders as _reminders,
+            world as _world,
+        )
         from .kit import CATALOG
         from .tools import Toolbox
 
@@ -59,6 +64,7 @@ class KitSession:
         self.reminders = _reminders.ReminderStore(root)
         self.notes = _notes.NoteStore(root)
         self.world = _world.WorldFeed(root)
+        self.loops = _loops.LoopBook(root)
         self.box = Toolbox(CATALOG, spec.enabled, describe=spec.describe)
         self.box.bind(self)
 
@@ -209,6 +215,52 @@ def check(root: Path | str) -> list[str]:
     mod = _adapter(spec.adapter)
     if not mod.available():
         problems.append(f"{spec.adapter} 키가 없다 — 정의는 성하지만 못 뜬다")
+
+    if spec.watch and not spec.watch.get("slack"):
+        # ★ 켜 놓고 방이 없으면 **아무 말 없이 아무것도 안 한다.** 매시 깨어나서
+        #   빈 손으로 돌아오는 것을 사람은 몇 주 뒤에나 눈치챈다.
+        problems.append("(참고) [watch] 가 있는데 보는 방이 없다 — `rooms` 로 id 를 찾아 넣어라")
+
+    if spec.watch.get("slack"):
+        # ★ 키가 없어도 `check` 는 돈다. 그런데 **읽는 자리가 안 열리는 것은
+        #   조용한 고장**이다 — 아무 말도 안 하고 원장만 안 찬다. 그래서 여기서
+        #   한 번 짚는다.
+        # ★ 프리픽스를 손으로 준다. 여기는 `env.use` 를 안 부르는 자리라
+        #   그냥 `env.get` 을 쓰면 접두사 없는 이름을 찾고, 있는 토큰을 없다고 말한다.
+        이름 = env.key("SLACK_USER_TOKEN", spec.prefix)
+        토큰 = env.get("SLACK_USER_TOKEN", 프리픽스=spec.prefix)
+        if not 토큰:
+            problems.append(
+                f"{이름} 이 없다 — [watch] slack 을 못 읽는다\n"
+                f"     {spec.root / '.env'} 에 한 줄: {이름}=xoxp-..."
+            )
+        elif not 토큰.startswith("xoxp-"):
+            # ★ **제일 하기 쉬운 실수다.** Slack CLI 로 앱을 만들면 손에 먼저
+            #   잡히는 것이 봇 토큰(xoxb-)이고, 그걸로는 팀원 DM 이 한 줄도 안
+            #   보인다. 에러도 안 난다 — 빈 방으로 보일 뿐이다. 그게 제일 나쁘다.
+            어떤것 = "봇 토큰(xoxb-)이다" if 토큰.startswith("xoxb-") else "모르는 꼴이다"
+            problems.append(
+                f"{이름} 이 사용자 토큰이 아니다 — {어떤것}. "
+                "사용자 토큰으로 읽고 봇 토큰으로 말한다(wiring.md 3절)"
+            )
+        # ★ 봇 토큰은 아직 아무 데서도 안 읽는다(5단계). 그래도 지금 본다 —
+        #   그때가 되면 이 값은 **몇 주 전에 넣어 둔 것**이라 아무도 다시 안 본다.
+        #   봇 칸에 사용자 토큰이 들어가면 봇이 본인 이름으로 말하고,
+        #   팀원이 사람과 봇을 구분 못 하게 된다. 되돌릴 수 없는 종류다(§1).
+        봇 = env.get("SLACK_BOT_TOKEN", 프리픽스=spec.prefix)
+        if 봇 and not 봇.startswith("xoxb-"):
+            문제 = ("사용자 토큰(xoxp-)이다 — 이걸로 말하면 본인이 친 것으로 보인다"
+                  if 봇.startswith("xoxp-") else "모르는 꼴이다")
+            problems.append(
+                f"{env.key('SLACK_BOT_TOKEN', spec.prefix)} 이 봇 토큰이 아니다 — {문제}"
+            )
+
+        나쁜방 = [r for r in spec.watch["slack"]
+                if not (isinstance(r, str) and r[:1] in "CDG" and r[1:].isalnum())]
+        if 나쁜방:
+            problems.append(
+                f"[watch] slack 은 채널 **id** 다(C·D·G 로 시작): {나쁜방}"
+            )
 
     if not spec.identity:
         problems.append("(참고) 정체성 파일이 없다. 지침만으로 돈다")
