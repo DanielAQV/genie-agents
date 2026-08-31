@@ -172,7 +172,14 @@ def find_markers(text: str) -> list[str]:
     return out
 
 
-def unpack(text: str, store: MediaStore, ears=None) -> tuple[str, list | None]:
+# 사진 한 장이 붙어 있다는 것만 말하는 주석. 원본 픽셀이 따로 실려 가므로
+# 이름 말고는 할 말이 없다 — 기억에 남길 때는 뺀다(아래 `unpack`).
+IMAGE_NOTE = "[사진]"
+
+
+def unpack(
+    text: str, store: MediaStore, ears=None
+) -> tuple[str, list | None, str]:
     """표시를 풀어 에이전트가 받는 모양으로 바꾼다 — (글, images).
 
     **사진은 `images=` 로 가고 소리는 받아쓴 글이 된다.** 에이전트 모델은 소리를
@@ -186,7 +193,7 @@ def unpack(text: str, store: MediaStore, ears=None) -> tuple[str, list | None]:
     """
     ids = find_markers(text)
     if not ids:
-        return text, None
+        return text, None, ""
 
     images: list = []
     notes: list[str] = []
@@ -196,7 +203,7 @@ def unpack(text: str, store: MediaStore, ears=None) -> tuple[str, list | None]:
             notes.append("(붙인 것을 못 찾았다)")
         elif item.is_image:
             images.append((item.read(), item.mime))
-            notes.append("[사진]")
+            notes.append(IMAGE_NOTE)
         elif item.is_video:
             note, shots = _watch(item, ears)
             images.extend(shots)
@@ -206,7 +213,24 @@ def unpack(text: str, store: MediaStore, ears=None) -> tuple[str, list | None]:
 
     # 표시는 모델에게도 안 보인다. 원본이 이미 실려 가는데 표시까지 남기면
     # 에이전트가 그걸 글자로 읽고 따라 쓴다 — 실제로 출력 형식으로 배어든 적이 있다.
-    return " ".join([*notes, strip_markers(text)]).strip(), images or None
+    #
+    # ★ **주석은 따로도 돌려준다.** 부르는 쪽이 기억에 남길 글을 만들 때 쓴다.
+    #   기억에는 **원문(표시 포함)** 이 남아야 한다 — 화면이 기억에서 그려지므로
+    #   표시가 없으면 사용자가 보낸 사진이 화면에서 `[사진]` 이라는 글자가 된다.
+    #   유나 쪽에서 실제로 그랬다(2026-08-31, 21줄).
+    #
+    #   두 번 부르게 하지 않는 이유는 값이다. 소리 받아쓰기와 영상 보기가 여기서
+    #   도는데, 모델용과 기억용을 따로 부르면 그게 두 번 돈다.
+    #
+    #   `[사진]` 만 남는 주석은 뺀다 — 표시가 살아 있으면 그 이름은 아무것도
+    #   더 말해주지 않는다. 소리·영상 주석은 남긴다: 받아쓴 글과 본 것은
+    #   표시에 없는 것이고, 나중에 되짚는 건 목소리가 아니라 내용이다.
+    keep = [n for n in notes if n != IMAGE_NOTE]
+    return (
+        " ".join([*notes, strip_markers(text)]).strip(),
+        images or None,
+        " ".join(keep).strip(),
+    )
 
 
 def _hear(item: Item, ears) -> str:
