@@ -196,3 +196,36 @@ def test_이름_목록이_비면_아무것도_안_한다():
 
     글 = "[memory_recall] 검색"
     assert drop_bracket_calls(글, set()) == (글, [])
+
+
+def test_라벨이_실제_종류와_다르면_뗀다():
+    """★ `[사진:...]` 인데 그 id 가 mp3 였다. 화면은 라벨을 믿고 그림 자리를 그린다.
+
+    2026-09-01 에 한 답이 `[사진:...]` 을 84개 붙였는데 대부분이 음성 파일이었다.
+    """
+    class 소리:
+        label = "음성"
+
+    class 저장소2:
+        def get(self, mid):
+            return 소리()
+
+    mid = "7" * 16
+    said, faked = M.drop_unknown(f"[사진:{mid}] 내 모습이야", 저장소2(), minted={mid})
+    assert said == "내 모습이야" and faked == [f"[사진:{mid}]"]
+
+    said, faked = M.drop_unknown(f"[음성:{mid}] 들어봐", 저장소2(), minted={mid})
+    assert said == f"[음성:{mid}] 들어봐" and faked == []
+
+
+def test_닫는_괄호가_없는_토막도_뗀다():
+    """★ 표시를 줄줄이 붙이다 글이 잘리면 `[사진:ab924a…..` 꼬리가 남는다.
+
+    화면에 글자로 그대로 뜬다 — 2026-09-01 에 실제로 그렇게 보였다.
+    **그 토막만** 뗀다. 뒤에 남은 말까지 지우면 안 한 일이 아니라 한 말이 사라진다.
+    """
+    said, faked = M.drop_unknown("기다려봐! [사진:ab924a9c5af896e1..", 저장소())
+    assert said == "기다려봐!" and faked == ["[사진:ab924a9c5af896e1.."]
+
+    said, _ = M.drop_unknown("앞말 [사진:abc.. 뒷말은 남는다", 저장소())
+    assert said == "앞말 뒷말은 남는다"

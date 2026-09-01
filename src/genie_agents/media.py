@@ -483,12 +483,26 @@ def drop_unknown(text: str, store, minted=None) -> tuple[str, list[str]]:
             break
         end = text.find("]", at)
         if end == -1:
-            out.append(text[i:])
-            break
+            # ★ **닫는 `]` 가 없는 토막도 뗀다.** 표시를 줄줄이 붙이다 글이 잘리면
+            #   `[사진:ab924a…..` 같은 꼬리가 남고, 그건 화면에 글자로 그대로 뜬다.
+            #   실제로 그렇게 보였다(2026-09-01). 다만 **그 토막만** 뗀다 —
+            #   뒤에 남은 말까지 같이 지우면 안 한 일이 아니라 한 말이 사라진다.
+            토막끝 = at
+            while 토막끝 < len(text) and not text[토막끝].isspace():
+                토막끝 += 1
+            out.append(text[i:at])
+            dropped.append(text[at:토막끝])
+            i = 토막끝
+            continue
         mid = text[at + len(label) + 2 : end]
-        있다 = store is not None and store.get(mid) is not None
+        item = store.get(mid) if store is not None else None
+        있다 = item is not None
+        # ★ **라벨이 실제 종류와 맞나.** `[사진:...]` 인데 그 id 가 mp3 인 판이 있었다
+        #   (2026-09-01, 한 답에 84개를 긁어 붙였고 대부분이 음성 파일이었다).
+        #   화면은 라벨을 믿고 그림 자리를 그린다 — 안 맞으면 없는 것을 있다고 말한다.
+        종류맞다 = getattr(item, "label", label) == label
         내것 = minted is None or mid in minted
-        if 있다 and 내것:
+        if 있다 and 종류맞다 and 내것:
             out.append(text[i : end + 1])  # 이번 턴에 내 도구가 붙였다. 그대로 둔다
         else:
             out.append(text[i:at])  # 가짜다. 뗀다
