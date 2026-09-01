@@ -42,6 +42,17 @@ class Spec:
     id: str
     prefix: str
     adapter: str
+    fallback: str
+    """평소 어댑터가 안 열릴 때 갈아탈 자리. 안 적으면 없다 — 그러면 안 열린 채로 죽는다.
+
+    ★ **로컬 모델을 쓸 때 이게 있어야 한다.** 모델이 내 PC 에 있으면 PC 가
+      자는 동안 상시 에이전트가 말을 못 한다. 그렇다고 코드가 조용히 API 로
+      새면 *"왜 이번 달 요금이 그대로지"* 가 몇 주 뒤에 온다.
+
+    ★ 그래서 **값으로 적고, 갈아탄 것을 한 줄 남긴다.** 갈아타는 것 자체는
+      옳은 동작이고, 나쁜 것은 갈아탄 줄 모르는 것이다.
+    """
+
     model: str
     timezone: str
     utc_offset: float
@@ -140,7 +151,7 @@ def _policy(raw: dict) -> Policy:
 # 각 절이 아는 칸. **모르는 칸은 걸린다** — `timezon` 하나 잘못 적으면 조용히
 # UTC 로 돌고, 그건 몇 주 뒤 시간이 이상한 걸로 발견된다.
 _SECTIONS = {
-    "agent": {"id", "prefix", "adapter", "model", "timezone", "utc_offset"},
+    "agent": {"id", "prefix", "adapter", "fallback", "model", "timezone", "utc_offset"},
     "prompt": {"instructions", "identity", "extract"},
     "tools": {"module", "gated", "enable", "describe"},
     "nudge": set(Nudge.__dataclass_fields__),
@@ -179,8 +190,16 @@ def load(root: Path | str) -> Spec:
         raise BadSpec(f"id 는 글자·숫자·-·_ 만 쓴다: {ident!r}")
 
     adapter = str(a.get("adapter") or "").strip()
-    if adapter not in ("anthropic", "gemini", "local"):
-        raise BadSpec(f"모르는 어댑터다: {adapter!r} (anthropic | gemini | local)")
+    아는것 = ("anthropic", "gemini", "local")
+    if adapter not in 아는것:
+        raise BadSpec(f"모르는 어댑터다: {adapter!r} ({' | '.join(아는것)})")
+    fallback = str(a.get("fallback") or "").strip()
+    if fallback and fallback not in 아는것:
+        raise BadSpec(f"모르는 폴백이다: {fallback!r} ({' | '.join(아는것)})")
+    if fallback == adapter:
+        # 자기 자신으로 갈아타는 것은 안 갈아타는 것이다. 적혀 있으면
+        # 적은 사람은 갈아탄다고 믿는다 — 그 믿음이 조용히 틀린다.
+        raise BadSpec(f"폴백이 어댑터와 같다: {adapter!r}")
 
     p = raw.get("prompt") or {}
     cast = raw.get("cast")
@@ -199,6 +218,7 @@ def load(root: Path | str) -> Spec:
         # 안 밟는다. 안 적으면 id 를 대문자로 쓴다.
         prefix=str(a.get("prefix") or ident).upper().replace("-", "_"),
         adapter=adapter,
+        fallback=fallback,
         model=str(a.get("model") or ""),
         timezone=str(a.get("timezone") or "UTC"),
         utc_offset=float(a.get("utc_offset") or 0),
@@ -223,6 +243,9 @@ TEMPLATE = '''# 이 폴더 하나가 에이전트 하나다.
 [agent]
 id = "{id}"
 adapter = "{adapter}"        # anthropic | gemini | local
+# fallback = "anthropic"     # 평소 어댑터가 안 열릴 때. 로컬이면 이게 있어야 한다
+#                            # ★ 갈아탄 것은 로그에 한 줄 남는다 — 조용히 새면
+#                            #   "왜 요금이 그대로지" 가 몇 주 뒤에 온다
 # model    = ""              # 안 적으면 어댑터 기본값
 # prefix   = "{prefix}"      # 환경변수 앞머리. 안 적으면 id 를 대문자로
 timezone = "Asia/Seoul"

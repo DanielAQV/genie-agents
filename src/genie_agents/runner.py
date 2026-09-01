@@ -154,8 +154,7 @@ class Agent:
 
 
 def _default_model(spec: Spec) -> str:
-    mod = _adapter(spec.adapter)
-    return mod.default_model()
+    return _model_for(spec)[1]
 
 
 def _adapter(name: str):
@@ -164,9 +163,39 @@ def _adapter(name: str):
     return {"anthropic": anthropic, "gemini": gemini, "local": local}[name]
 
 
-def _client_for(spec: Spec):
-    """어댑터를 **늦게** 부른다. SDK 가 없어도 `check` 는 돌아야 한다."""
-    return _adapter(spec.adapter).client()
+def _client_for(spec: Spec) -> Any:
+    """어댑터를 **늦게** 부른다. SDK 가 없어도 `check` 는 돌아야 한다.
+
+    ★ `fallback` 이 적혀 있고 평소 자리가 안 열려 있으면 그리로 간다.
+      **갈아탄 것은 반드시 한 줄 남긴다** — 조용히 갈아타면 아낀 줄 알았던
+      요금이 그대로고, 그걸 몇 주 뒤에 안다.
+    """
+    from .adapters import local
+
+    mod = _adapter(spec.adapter)
+    if spec.fallback and not mod.available():
+        딴것 = _adapter(spec.fallback)
+        # ★ 한 줄 남기는 규칙은 `adapters/local.switched` 한 군데에 있다 —
+        #   자리별로 고르는 쪽(유나·예나 `agent.py`)도 같은 것을 부른다.
+        #   규칙이 하나면 자리도 하나여야 그중 하나가 낡지 않는다.
+        local.switched(spec.adapter, spec.fallback,
+                       local_url() if spec.adapter == "local" else "")
+        return 딴것.client()
+    return mod.client()
+
+
+def _model_for(spec: Spec) -> tuple[str, str]:
+    """`(어느 어댑터, 어느 모델)`. 폴백까지 보고 정한다.
+
+    ★ 모델 이름을 어댑터와 따로 정하면 **갈아탄 뒤에도 옛 모델 이름을 보낸다.**
+      로컬 모델 이름을 Anthropic 에 보내면 그 턴이 통째로 죽는다.
+    """
+    쓸것 = spec.adapter
+    if spec.fallback and not _adapter(spec.adapter).available():
+        쓸것 = spec.fallback
+    mod = _adapter(쓸것)
+    # `model` 은 그 어댑터의 것이다. 갈아탔으면 손으로 적은 이름을 안 쓴다.
+    return 쓸것, (spec.model if 쓸것 == spec.adapter and spec.model else mod.default_model())
 
 
 def _session_for(spec: Spec):
@@ -219,7 +248,13 @@ def check(root: Path | str) -> list[str]:
             problems.append(f"도구를 읽다 죽었다: {type(e).__name__}: {e}")
 
     mod = _adapter(spec.adapter)
-    if not mod.available():
+    if not mod.available() and spec.fallback:
+        딴것 = _adapter(spec.fallback)
+        problems.append(
+            f"(참고) {spec.adapter} 이 안 열려 있다 — {spec.fallback} 으로 간다"
+            + ("" if 딴것.available() else f". 그런데 {spec.fallback} 도 안 열린다")
+        )
+    elif not mod.available():
         # 로컬은 키가 아니라 **프로세스**가 없는 것이다. 고치는 길이 달라서
         # 말도 달라야 한다 — "키가 없다" 는 여기서 사람을 엉뚱한 데로 보낸다.
         problems.append(

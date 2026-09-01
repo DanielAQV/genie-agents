@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import json
 import socket
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -72,6 +73,50 @@ def url() -> str:
 
 def default_model(fast: bool = False) -> str:
     return env.get("LOCAL_MODEL") or DEFAULT_MODEL
+
+
+def scopes(default: frozenset[str] = frozenset()) -> frozenset[str]:
+    """이 기계 안의 모델로 갈 자리들. **적힌 것만 간다.**
+
+        {프리픽스}_LOCAL_SCOPES=conversation,wake,일상
+
+    ★ **주소와 같은 규칙이다** — 적는 순간 결정이고, 결정은 보이는 자리에
+      있어야 한다. 되돌리는 법은 그 줄을 지우는 것이다.
+
+    ★ **여기 한 군데서만 읽는다.** 유나와 예나가 각자 자기 `agent.py` 에서
+      같은 파싱을 하고 있었다(2026-09-01 에 합쳤다). 자리 이름을 쉼표로 가르는
+      규칙이 두 벌이면 그중 하나가 언젠가 낡는다.
+
+    `default` 는 **아무것도 안 적혔을 때**의 값이다. 유나에게는 일상이 이미
+    로컬이던 이력이 있어서 그 자리를 기본값으로 넘긴다 — 배포하다 만 상태에서
+    돌던 것이 조용히 클라우드로 돌아가지 않게.
+    """
+    raw = env.get("LOCAL_SCOPES")
+    if raw is None:
+        return default
+    return frozenset(s.strip() for s in raw.split(",") if s.strip())
+
+
+def switched(frm: str, to: str, why: str = "") -> None:
+    """갈아탄 것을 **반드시 한 줄 남긴다.**
+
+    ★ 조용히 갈아타면 아낀 줄 알았던 요금이 그대로고, 그걸 몇 주 뒤에 안다.
+      갈아타는 것 자체는 옳은 동작이고, 나쁜 것은 갈아탄 줄 모르는 것이다.
+
+    ★ 부르는 데가 셋이다 — 스펙에 적힌 `fallback`(`runner._client_for`), 자리별로
+      고르는 쪽, 그리고 **도중에** 꺼졌을 때(둘 다 유나·예나 `agent.py`).
+      규칙이 하나라 자리도 하나다.
+    """
+    # 받침을 보고 조사를 고른다. 이 줄은 사람이 읽는 자리라 "클라우드 으로" 나
+    # "anthropic 로" 가 나오면 눈에 걸린다. ㄹ 받침은 '로' 를 쓰고, 어댑터
+    # 이름은 로마자라 끝소리가 홀소리인지로 가른다(gemini 로 / anthropic 으로).
+    끝 = to[-1].lower() if to else ""
+    if "가" <= 끝 <= "힣":
+        조사 = "로" if (ord(끝) - 0xAC00) % 28 in (0, 8) else "으로"
+    else:
+        조사 = "로" if 끝 in "aeiouy" else "으로"
+    print(f"  ↪ {frm} 이 안 열려서 {to} {조사} 간다" + (f" ({why})" if why else ""),
+          file=sys.stderr)
 
 
 def available() -> bool:
