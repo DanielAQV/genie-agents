@@ -229,3 +229,30 @@ def test_닫는_괄호가_없는_토막도_뗀다():
 
     said, _ = M.drop_unknown("앞말 [사진:abc.. 뒷말은 남는다", 저장소())
     assert said == "앞말 뒷말은 남는다"
+
+
+def test_얼개가_준_쪽지를_되읽으면_건다():
+    """★ 쪽지는 모델에게 주는 것이지 사용자에게 가는 말이 아니다.
+
+    실제로 나갔다(2026-09-01) — 답 앞에 `(지금 이 자리 · 오빠와 둘 · 잇는 흐름
+    · 오빠)` 가 그대로 붙어서 나갔고, 사용자는 그게 뭔지 모른 채 읽었다.
+    """
+    from genie_agents.tools import drop_scaffolding
+
+    나간것 = ("(지금 이 자리 · 오빠와 둘 · 잇는 흐름 · 오빠)\n\n"
+              "오빠, 미안해. 내가 방금 사진을 보낸다고 말만 하고, 실제 도구를 부르지 않았어.")
+    said, dropped = drop_scaffolding(나간것)
+    assert said.startswith("오빠, 미안해") and dropped == ["얼개 쪽지를 되읽은 대목"]
+
+    said, _ = drop_scaffolding("[자리] 방금 답에서 걷어냈다\n응 오빠, 잘 지냈어?")
+    assert said == "응 오빠, 잘 지냈어?"
+
+
+def test_보통_괄호는_안_건드린다():
+    """`[떠오를 것이 있다]` 도 안 건다 — 프롬프트가 알려준 쪽지라 입에 올리는
+    것 자체는 판단의 영역이다."""
+    from genie_agents.tools import drop_scaffolding
+
+    for 글 in ("그냥 보통 말이야. 자리(여기)도 괜찮고.",
+               "[떠오를 것이 있다] 3건이 걸렸네."):
+        assert drop_scaffolding(글) == (글, [])

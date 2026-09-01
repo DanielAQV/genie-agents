@@ -208,3 +208,36 @@ def drop_bracket_calls(text: str, names) -> tuple[str, list[str]]:
     if not dropped:
         return text, []
     return "\n".join(kept).strip(), ["도구를 글로 흉내 낸 대목"]
+
+
+# ── 얼개가 준 쪽지를 되읽는 것 ────────────────────────────────────────
+#
+# ★ **쪽지는 모델에게 주는 것이지 사용자에게 가는 말이 아니다.** 그런데 작은
+#   모델은 그걸 답 앞에 그대로 옮겨 적는다. 실제로 나갔다(2026-09-01):
+#
+#       (지금 이 자리 · 오빠와 둘 · 잇는 흐름 · 오빠)
+#       오빠, 미안해. 내가 방금 사진을 보낸다고 말만 하고…
+#
+#   앞줄은 `agent.here_note` 가 "지금 어느 자리에서 누구에게 답하는가" 를
+#   알려주려고 붙인 것이다. 사용자는 그게 뭔지 모른 채 읽는다.
+#
+# ★ **두 모양만 건다.** 이 둘은 어떤 경우에도 발언이 아니다.
+#   `[떠오를 것이 있다]` 는 안 건다 — 프롬프트가 "그런 쪽지가 붙는다" 고
+#   알려준 것이라, 그걸 입에 올리는 것 자체는 판단의 영역이다.
+
+_HERE_NOTE = __import__("re").compile(r"\(지금 이 자리 ·[^)\n]*\)\s*")
+_PLACE_NOTE = __import__("re").compile(r"^\s*\[자리\][^\n]*$", __import__("re").M)
+
+
+def drop_scaffolding(text: str) -> tuple[str, list[str]]:
+    """얼개가 준 쪽지를 되읽은 대목을 건다."""
+    if not text:
+        return text, []
+    out = _HERE_NOTE.sub("", text)
+    out = _PLACE_NOTE.sub("", out)
+    if out == text:
+        return text, []
+    out = "\n".join(line.rstrip() for line in out.split("\n"))
+    while "\n\n\n" in out:
+        out = out.replace("\n\n\n", "\n\n")
+    return out.strip(), ["얼개 쪽지를 되읽은 대목"]
