@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import threading
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -39,10 +40,11 @@ def 붙은것(monkeypatch):
     sl = _serve_local()
     본것 = {}
 
-    def 가짜(messages, max_tokens, temperature):
+    def 가짜(messages, max_tokens, temperature, tools=None):
         본것["messages"] = messages
         본것["max_tokens"] = max_tokens
         본것["temperature"] = temperature
+        본것["tools"] = tools
         return {"text": '{"opens": [], "moves": [], "unresolved": []}',
                 "in": 123, "out": 45, "finish": "stop"}
 
@@ -134,3 +136,74 @@ def test_없는_자리는_404(붙은것):
     with pytest.raises(urllib.error.HTTPError) as e:
         urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/embeddings", timeout=5)
     assert e.value.code == 404
+
+
+# ── 도구 · 임베딩 (2026-09-01) ──────────────────────────────────────
+#
+# ★ **이 자리에 시험이 없어서 조용히 깨진 적이 있다.** `generate` 에 `tools` 를
+#   더했는데 위 픽스처의 가짜가 인자 셋만 받아서 500 을 냈고, 그 커밋이 시험을
+#   안 돌리고 나갔다. 서명이 갈리는 자리는 시험이 잡아야 한다.
+
+
+def test_도구가_생성까지_내려간다(붙은것):
+    c, 본것, _sl, _port = 붙은것
+    도구 = {"name": "unseen_note", "description": "적는다",
+            "input_schema": {"type": "object", "properties": {}}}
+    c.messages.create(model="m", max_tokens=8, tools=[도구],
+                      messages=[{"role": "user", "content": "x"}])
+
+    보낸 = 본것["tools"]
+    assert 보낸 and 보낸[0]["function"]["name"] == "unseen_note"
+
+
+def test_부른_것을_tool_calls_로_돌려준다():
+    """`<tool_call>` 은 특수 토큰이 아니라 글자다. 글에서 떼어내 싣는다."""
+    sl = _serve_local()
+    말, 부름 = sl.부른것(
+        "음" + chr(10) + '<tool_call>{"name": "unseen_note", "arguments": {"text": "비"}}</tool_call>'
+    )
+    assert 말 == "음"
+    assert 부름[0]["function"]["name"] == "unseen_note"
+    assert json.loads(부름[0]["function"]["arguments"]) == {"text": "비"}
+
+
+def test_망가진_JSON_은_글로_남는다():
+    """4B 는 인자를 어긋나게 낼 때가 있다. 버리면 그 판이 아무 말 없이 끝난다."""
+    sl = _serve_local()
+    말, 부름 = sl.부른것("앞 <tool_call>{망가</tool_call> 뒤")
+    assert 부름 == []
+    assert "망가" in 말
+
+
+def test_임베딩도_같은_구멍에서_난다(monkeypatch):
+    """회상 임베딩을 이 기계 밖으로 안 내보내기로 했다(2026-09-01).
+    카드가 6GB 라 프로세스를 안 늘리고 자물쇠를 나눠 쓴다."""
+    import urllib.request
+
+    sl = _serve_local()
+    본것 = {}
+
+    def 가짜(texts, model_id):
+        본것["texts"], 본것["model"] = texts, model_id
+        return [[0.1, 0.2, 0.3] for _ in texts]
+
+    sl.embed = 가짜
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), sl.Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    port = srv.server_address[1]
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/v1/embeddings",
+            data=json.dumps({"input": ["안녕", "잘 지내"]}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            got = json.loads(r.read().decode("utf-8"))
+    finally:
+        srv.shutdown()
+
+    assert 본것["texts"] == ["안녕", "잘 지내"]
+    assert [d["embedding"] for d in got["data"]] == [[0.1, 0.2, 0.3]] * 2
+    assert [d["index"] for d in got["data"]] == [0, 1]
+    # 토큰 수를 세는 값이 여기 없다. **0 을 보낸다** — 지어내면 값 기록이 틀린다.
+    assert got["usage"]["total_tokens"] == 0

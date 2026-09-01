@@ -41,6 +41,17 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 MODEL = None
 TOK = None
 NAME = ""
+
+# 임베더는 따로 든다. **부를 때 올리고 안 쓰면 내린다** — 6GB 에서 채팅과
+# 임베딩이 같이 앉아 있으면 4.8GB 가 늘 차고, 채팅 쪽 KV 캐시 자리가 준다.
+EMB = None
+EMB_TOK = None
+EMB_NAME = ""
+EMB_USED = 0.0
+EMB_IDLE = 600.0   # 이만큼 안 쓰면 내린다
+EMB_MAXLEN = 2048  # 기억 한 줄 p99 가 2,800자 ≈ 1,600토큰. 여기까지 덮는다
+EMB_BUDGET = 6144  # 한 묶음의 토큰 상한
+EMB_DEFAULT = "BAAI/bge-m3"  # 다국어. 유나·예나 기억이 한국어라 여기가 갈린다
 LOCK = threading.Lock()
 """한 번에 하나만 만든다.
 
@@ -163,6 +174,89 @@ def generate(messages: list[dict], max_tokens: int, temperature: float,
         return got
 
 
+def load_embedder(model_id: str):
+    """임베더를 올린다. 이미 올라와 있으면 그대로.
+
+    ★ **채팅 자물쇠를 같이 쓴다.** 6GB 에서 둘이 동시에 돌면 OOM 이고, 그 OOM 은
+      답하는 쪽을 죽인다. 부르는 쪽이 이미 `LOCK` 을 쥐고 들어온다.
+    """
+    import torch
+    from transformers import AutoModel, AutoTokenizer
+
+    global EMB, EMB_TOK, EMB_NAME
+    if EMB is not None and EMB_NAME == model_id:
+        return EMB
+    unload_embedder()
+    print(f"  임베더 올린다 — {model_id}", flush=True)
+    EMB_TOK = AutoTokenizer.from_pretrained(model_id)
+    EMB = AutoModel.from_pretrained(model_id, dtype=torch.float16).to("cuda").eval()
+    EMB_NAME = model_id
+    if torch.cuda.is_available():
+        print(f"  임베더 올렸다 — VRAM {torch.cuda.memory_allocated() / 1024**3:.2f}GB",
+              flush=True)
+    return EMB
+
+
+def unload_embedder() -> None:
+    global EMB, EMB_TOK, EMB_NAME
+    if EMB is None:
+        return
+    import torch
+
+    EMB = EMB_TOK = None
+    EMB_NAME = ""
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    print("  임베더 내렸다", flush=True)
+
+
+def _reaper() -> None:
+    """안 쓰는 임베더를 내리는 실. 1분마다 본다."""
+    while True:
+        time.sleep(60)
+        if EMB is not None and EMB_USED and time.time() - EMB_USED > EMB_IDLE:
+            with LOCK:
+                if EMB is not None and time.time() - EMB_USED > EMB_IDLE:
+                    unload_embedder()
+
+
+def embed(texts: list[str], model_id: str) -> list[list[float]]:
+    """bge-m3 의 dense 벡터 — **CLS 토큰을 정규화한 것**이다.
+
+    질의와 문서에 접두사를 안 붙인다(bge-en 계열과 다르다).
+
+    ★ **길이로 묶는다.** 기억은 중앙값이 100자 남짓인데 p99 가 2,800자다.
+      고정 배치로 묶으면 짧은 줄 열둘이 긴 줄 하나에 맞춰 패딩되어 대부분이
+      빈칸 계산이 된다.
+    """
+    import torch
+
+    global EMB_USED
+    with LOCK:
+        model = load_embedder(model_id)
+        EMB_USED = time.time()
+        order = sorted(range(len(texts)), key=lambda i: len(texts[i]))
+        out: list = [None] * len(texts)
+        i = 0
+        while i < len(order):
+            긴것 = min(len(texts[order[i]]) // 2 + 8, EMB_MAXLEN)
+            묶음 = max(1, min(EMB_BUDGET // max(긴것, 1), 32, len(order) - i))
+            chunk = [texts[j] or " " for j in order[i : i + 묶음]]
+            ins = EMB_TOK(chunk, padding=True, truncation=True,
+                          max_length=EMB_MAXLEN, return_tensors="pt").to(model.device)
+            with torch.no_grad():
+                h = model(**ins).last_hidden_state[:, 0]
+                h = torch.nn.functional.normalize(h, dim=-1).float().cpu()
+            for k, j in enumerate(order[i : i + 묶음]):
+                out[j] = h[k].tolist()
+            del ins, h
+            i += 묶음
+        EMB_USED = time.time()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return out
+
+
 class Handler(BaseHTTPRequestHandler):
     def _send(self, code: int, body: dict) -> None:
         blob = json.dumps(body, ensure_ascii=False).encode("utf-8")
@@ -180,7 +274,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, {"error": "없는 자리"})
 
     def do_POST(self):  # noqa: N802
-        if self.path.rstrip("/") != "/v1/chat/completions":
+        자리 = self.path.rstrip("/")
+        if 자리 not in ("/v1/chat/completions", "/v1/embeddings"):
             self._send(404, {"error": "없는 자리"})
             return
         try:
@@ -188,6 +283,10 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(n).decode("utf-8"))
         except (ValueError, UnicodeDecodeError) as e:
             self._send(400, {"error": f"몸통을 못 읽었다: {e}"})
+            return
+
+        if 자리 == "/v1/embeddings":
+            self._embed(body)
             return
 
         t0 = time.time()
@@ -228,6 +327,35 @@ class Handler(BaseHTTPRequestHandler):
                       "total_tokens": got["in"] + got["out"]},
         })
 
+    def _embed(self, body: dict) -> None:
+        """OpenAI 호환 `/v1/embeddings`. 유나·예나의 회상이 여기로 온다."""
+        입력 = body.get("input")
+        if isinstance(입력, str):
+            입력 = [입력]
+        if not isinstance(입력, list) or not 입력:
+            self._send(400, {"error": "input 이 비었다"})
+            return
+        model_id = body.get("model") or EMB_DEFAULT
+        t0 = time.time()
+        try:
+            vecs = embed([str(x) for x in 입력], model_id)
+        except Exception as e:  # noqa: BLE001 — 무엇이든 부른 쪽에 알려준다
+            self._send(500, {"error": f"{type(e).__name__}: {e}"})
+            return
+        걸린 = time.time() - t0
+        글자 = sum(len(str(x)) for x in 입력)
+        print(f"  임베딩 {len(입력):>5}줄 · {글자:>7}자 · {걸린:5.1f}초 "
+              f"· {len(vecs[0])}차원", flush=True)
+        self._send(200, {
+            "object": "list",
+            "model": model_id,
+            "data": [{"object": "embedding", "index": i, "embedding": v}
+                     for i, v in enumerate(vecs)],
+            # 이 자리에는 토큰 수를 세는 값이 없다. **0 을 보낸다** — 없는 것을
+            # 지어내면 값 기록이 조용히 틀린다.
+            "usage": {"prompt_tokens": 0, "total_tokens": 0},
+        })
+
     def log_message(self, *a):
         pass  # 우리가 위에서 한 줄로 찍는다
 
@@ -245,6 +373,9 @@ def main() -> int:
     print(f"  {args.model} · {args.bits}bit · {args.device} — 올리는 중", flush=True)
     load(args.model, args.bits, args.device)
     print(f"  http://{args.host}:{args.port}/v1/chat/completions 에서 듣는다", flush=True)
+    print(f"  http://{args.host}:{args.port}/v1/embeddings 도 같은 자리다 "
+          f"({EMB_DEFAULT} — 부를 때 올린다)", flush=True)
+    threading.Thread(target=_reaper, daemon=True).start()
     ThreadingHTTPServer((args.host, args.port), Handler).serve_forever()
     return 0
 
