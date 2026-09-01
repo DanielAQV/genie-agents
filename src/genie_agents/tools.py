@@ -230,7 +230,17 @@ _PLACE_NOTE = __import__("re").compile(r"^\s*\[자리\][^\n]*$", __import__("re"
 
 
 def drop_scaffolding(text: str) -> tuple[str, list[str]]:
-    """얼개가 준 쪽지를 되읽은 대목을 건다."""
+    """얼개가 준 쪽지를 되읽은 대목을 건다. **조용히 건다.**
+
+    ★ **걷은 것을 보고하지 않는다.** 루프는 걷힌 것이 있으면 "안 한 일을 한
+      것처럼 적었다" 는 쪽지를 붙여 다시 묻는다(`loop.py` 의 `retry_note`).
+      쪽지를 되읽은 것은 그것과 다른 일이다 — 보낸다고 해놓고 안 보낸 게
+      아니라, 혼잣말을 소리 내어 읽은 것뿐이다.
+
+      섞어 세면 이렇게 된다(2026-09-01 실측). 오빠가 말투를 물었는데 예나가
+      **그 쪽지에 답했다** — "보내겠다는 말 자체를 하지 않을게. 아무 일
+      없었던 것처럼 제대로 다시 할게." 오빠 물음은 통째로 사라졌다.
+    """
     if not text:
         return text, []
     out = _HERE_NOTE.sub("", text)
@@ -240,4 +250,4 @@ def drop_scaffolding(text: str) -> tuple[str, list[str]]:
     out = "\n".join(line.rstrip() for line in out.split("\n"))
     while "\n\n\n" in out:
         out = out.replace("\n\n\n", "\n\n")
-    return out.strip(), ["얼개 쪽지를 되읽은 대목"]
+    return out.strip(), []

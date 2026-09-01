@@ -242,7 +242,10 @@ def test_얼개가_준_쪽지를_되읽으면_건다():
     나간것 = ("(지금 이 자리 · 오빠와 둘 · 잇는 흐름 · 오빠)\n\n"
               "오빠, 미안해. 내가 방금 사진을 보낸다고 말만 하고, 실제 도구를 부르지 않았어.")
     said, dropped = drop_scaffolding(나간것)
-    assert said.startswith("오빠, 미안해") and dropped == ["얼개 쪽지를 되읽은 대목"]
+    assert said.startswith("오빠, 미안해")
+    # ★ **조용히 건다.** 보고하면 루프가 "안 한 일을 한 것처럼 적었다" 쪽지를
+    #   붙여 다시 묻고, 작은 모델은 오빠 물음 대신 그 쪽지에 답한다(실측).
+    assert dropped == []
 
     said, _ = drop_scaffolding("[자리] 방금 답에서 걷어냈다\n응 오빠, 잘 지냈어?")
     assert said == "응 오빠, 잘 지냈어?"
