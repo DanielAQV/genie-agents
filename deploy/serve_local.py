@@ -1,29 +1,57 @@
 """로컬 모델을 OpenAI 호환 한 구멍으로 낸다.
 
-    python deploy/serve_local.py --model Qwen/Qwen3-4B-Instruct-2507
+    python deploy/serve_local.py --model <gguf 경로>
 
 ★ **어댑터를 안 늘리려고 이걸 둔다.** `adapters/local.py` 는 이미 OpenAI 호환
   `/v1/chat/completions` 하나에 붙는다 — llama.cpp 서버 · vLLM 이 내는 그
-  모양이다. 여기서 transformers 를 쓰려고 두 번째 어댑터를 만들면, 골격이
-  *"루프는 한 모양만 본다"* 고 약속한 자리가 모델 런타임마다 갈리기 시작한다.
-  갈리는 것을 이 파일 한 장으로 막는다 — **나중에 llama.cpp 로 갈아타도
-  골격은 한 줄도 안 바뀐다.**
+  모양이다. 갈아타도 골격은 한 줄도 안 바뀐다고 여기 적어 뒀었는데, 실제로
+  그렇게 됐다: 아래에서 transformers 를 llama.cpp 로 통째로 바꿨고 어댑터는
+  한 줄도 안 건드렸다.
 
-★ **상주한다.** 이 골격의 다른 것들은 단발 실행인데 이건 아니다 — 4B 가중치를
-  깨어날 때마다 올리면 매번 십수 초를 버린다. 대신 이 프로세스가 죽어도
-  `wake` 는 그냥 "로컬 모델이 안 떠 있다" 를 말하고 넘어간다(`runner.check`).
+★ **상주한다.** 가중치를 깨어날 때마다 올리면 매번 십수 초를 버린다. 대신 이
+  프로세스가 죽어도 `wake` 는 "로컬 모델이 안 떠 있다" 를 말하고 넘어간다.
 
-━━ 왜 transformers 인가 ━━
+━━ 왜 llama.cpp 로 바꿨나 (2026-09-01 실측) ━━
 
-이 기계는 **Smart App Control** 이 서명 없는 실행 파일을 막는다(2026-08-31 확인).
-llama.cpp 프리빌트 바이너리가 전부 `0xC0000142` 로 죽는다. pip 로 깐 네이티브
-확장은 통과하므로 파이썬 쪽으로 왔다. 그리고 이 스택(torch+bitsandbytes)은
-**QLoRA 에도 그대로 필요하다** — 버리는 일이 아니다.
+전에 여기 *"Smart App Control 이 서명 없는 실행 파일을 막아서 llama.cpp 를
+못 쓴다"* 고 적혀 있었다. **맞는 관찰이었지만 `.exe` 얘기였다.** pip 휠은
+통과한다(그 문장 다음 줄에 이미 그렇게 적혀 있었다) — `llama-cpp-python` 이
+그것이다. 재 보니 값이 이렇게 달랐다:
 
-━━ 의존성 ━━
+    같은 카드(RTX 3050 6GB Laptop) · 같은 4bit
+      transformers + bitsandbytes NF4      llama.cpp CUDA
+        디코드   3.7 tok/s                   35.5 tok/s      9.6배
+        프리필   8K 에서 OOM                 1,374 tok/s
+        76K      못 올림                     들어간다 (4,439/6,144 MiB)
 
-    pip install torch --index-url https://download.pytorch.org/whl/cu126
-    pip install transformers bitsandbytes accelerate
+★ 3.7 tok/s 는 카드가 아니라 양자화 방식이었고, "여유 7,144 토큰" 은 KV 한계가
+  아니라 **SDPA 가 어텐션 행렬 L×L 을 통째로 만들던 것**이었다(8K 에서 8GB 를
+  한 번에 요구했다). 게다가 6GB 카드에 11.49GB 가 할당돼 있었다 — 드라이버가
+  안 죽고 조용히 시스템 메모리로 흘리고 있었다. 자세한 것은 princess 의
+  `coord/RUNTIME.md`.
+
+━━ 의존성과 이 기계의 함정 둘 ━━
+
+    pip download llama-cpp-python --no-deps -d <tmp> --only-binary=:all: \
+        --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124
+    pip install <tmp>/llama_cpp_python-*-win_amd64.whl
+
+★ **① `ggml-cuda.dll` 이 CUDA 런타임을 못 찾는다**(오류 126). torch 가 이미
+  `cudart64_12.dll` · `cublas64_12.dll` 을 갖고 있으므로 그 폴더를 PATH 에
+  넣는다. **아래 `_cuda_path()` 가 import 보다 먼저 돌아야 한다.**
+
+★ **② cu124 휠의 `ggml-cpu.dll` 이 AVX-512 를 쓴다**(`0xC000001D`). 이 기계
+  (Core 5 210H)는 AVX2 까지라 `llama_init_from_model` 에서 즉사한다. 같은
+  버전 **CPU 인덱스 휠**의 `ggml-cpu.dll` 로 덮어써야 한다:
+
+      --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+
+  **재설치하면 다시 덮어써야 한다.** 원본은 `ggml-cpu.dll.cu124bak` 에 있다.
+  `0xC000001D`(잘못된 명령)와 `0xC0000142`(초기화 실패)는 다른 것이다 —
+  뒤의 것이 Smart App Control 이고, 앞의 것은 CPU 명령어 집합이다.
+
+★ 임베더(bge-m3)는 아직 transformers 다. 그래서 torch 는 여전히 필요하고,
+  그 스택은 QLoRA 에도 그대로 쓴다 — 버리는 일이 아니다.
 
 ★ 이건 `pyproject.toml` 에 안 넣는다. 골격은 모델 SDK 를 안 짊어진다 —
   이 파일은 골격이 아니라 **호스트 쪽 도구**다(`deploy/` 에 있는 이유).
@@ -33,17 +61,44 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-MODEL = None
-TOK = None
+
+def _cuda_path() -> None:
+    """`ggml-cuda.dll` 이 볼 수 있게 torch 의 CUDA 런타임 폴더를 PATH 에 넣는다.
+
+    ★ **import 보다 먼저 돌아야 한다.** 안 그러면 오류 126 으로 안 뜬다.
+      작업 스케줄러에서 띄울 때도 이 파일이 스스로 하므로 밖에서 안 잡아도 된다.
+    """
+    try:
+        import torch
+    except ImportError:
+        return
+    lib = os.path.join(os.path.dirname(torch.__file__), "lib")
+    if os.path.isdir(lib):
+        os.environ["PATH"] = lib + os.pathsep + os.environ.get("PATH", "")
+        if hasattr(os, "add_dll_directory"):
+            try:
+                os.add_dll_directory(lib)
+            except OSError:
+                pass
+
+
+_cuda_path()
+
+LLM = None
 NAME = ""
+NCTX = 0
 
 # 임베더는 따로 든다. **부를 때 올리고 안 쓰면 내린다** — 6GB 에서 채팅과
-# 임베딩이 같이 앉아 있으면 4.8GB 가 늘 차고, 채팅 쪽 KV 캐시 자리가 준다.
+# 임베딩이 같이 앉아 있으면 자리가 없다. Gemma-4 가 76K 를 물면 4,439MiB 를
+# 쓰고 남는 것이 1.7GB 인데 bge-m3 fp16 은 2.3GB 다. 그래서 이 규칙은
+# llama.cpp 로 바꾼 뒤에도 그대로 필요하다.
 EMB = None
 EMB_TOK = None
 EMB_NAME = ""
@@ -53,176 +108,291 @@ EMB_MAXLEN = 2048  # 기억 한 줄 p99 가 2,800자 ≈ 1,600토큰. 여기까�
 EMB_BUDGET = 6144  # 한 묶음의 토큰 상한
 EMB_DEFAULT = "BAAI/bge-m3"  # 다국어. 유나·예나 기억이 한국어라 여기가 갈린다
 
-# 남은 VRAM 중 KV 캐시에 내줄 몫. 나머지는 활성값과 조각 여유다.
-KV_SHARE = 0.6
-# 안전바닥. VRAM 을 못 읽는 기계(CPU 전용)에서 이 값을 쓴다.
-FLOOR_TOKENS = 4096
 LOCK = threading.Lock()
 """한 번에 하나만 만든다.
 
 ★ `ThreadingHTTPServer` 는 요청마다 실을 하나 낸다. 6GB 짜리 카드에서 생성이
   둘 겹치면 KV 캐시가 두 벌 잡히고 그대로 OOM 이다. 상주 서버의 값은 가중치를
-  한 번만 올리는 것이지 동시에 여럿을 받는 것이 아니다."""
+  한 번만 올리는 것이지 동시에 여럿을 받는 것이 아니다.
+
+★ 사용자가 짚었다(2026-09-01) — "실제 사용자는 나 하나뿐이라는 거 잊지마."
+  맞다. **동시성 예산은 잡을 필요가 없다.**"""
 
 
-def load(model_id: str, bits: int, device: str):
-    """가중치를 한 번 올린다. **4bit 가 기본이다** — 6GB 짜리 카드에서
-    4B 를 bf16 으로 올리면 안 들어간다(8GB 넘는다)."""
-    import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+def vram() -> str:
+    import subprocess
 
-    global MODEL, TOK, NAME
-    NAME = model_id
-    TOK = AutoTokenizer.from_pretrained(model_id)
-
-    kw = {"dtype": torch.bfloat16, "device_map": device}
-    if bits == 4:
-        from transformers import BitsAndBytesConfig
-
-        kw["quantization_config"] = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.bfloat16,
-            # ★ 이중 양자화. 6GB 에서 이 한 줄이 여유를 만든다.
-            bnb_4bit_use_double_quant=True,
-        )
-    MODEL = AutoModelForCausalLM.from_pretrained(model_id, **kw)
-    MODEL.eval()
-    if torch.cuda.is_available():
-        쓴것 = torch.cuda.memory_allocated() / 1024**3
-        전체 = torch.cuda.get_device_properties(0).total_memory / 1024**3
-        print(f"  올렸다 — VRAM {쓴것:.2f}GB / {전체:.1f}GB", flush=True)
-    return MODEL
+    try:
+        o = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.used,memory.total",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5).stdout.strip().splitlines()[0]
+        used, total = (x.strip() for x in o.split(","))
+        return f"{used}/{total} MiB"
+    except Exception:  # noqa: BLE001
+        return "?"
 
 
-# Qwen3 가 도구를 부를 때 내는 모양. 특수 토큰이 아니라 그냥 글자라
-# `skip_special_tokens=True` 로 풀어도 그대로 남는다.
-CALL = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.S)
+def load(model_path: str, n_ctx: int, n_gpu_layers: int, kv_type: str):
+    """가중치를 한 번 올린다.
 
+    ★ **`swa_full=False` 가 여기서 제일 중요한 한 줄이다.** Gemma 계열은 층
+      대부분이 창 어텐션인데, 기본값(`True`)이면 그 층들도 `n_ctx` 칸을 통째로
+      잡는다. 실측(76,800 칸): **8,700 MiB → 174 MiB.** 로그에
+      `using full-size SWA cache` 가 보이면 잘못 잡힌 것이다.
 
-def 부른것(text: str) -> tuple[str, list[dict]]:
-    """(도구 부분을 뺀 글, OpenAI 모양의 tool_calls).
-
-    ★ **못 읽는 것은 글로 남긴다.** 4B 는 JSON 을 어긋나게 낼 때가 있는데,
-      여기서 버리면 그 판이 아무 말도 없이 끝난다. 어댑터가 빈 인자로
-      부르고 도구 쪽에서 받아 내게 두는 편이 낫다.
+    ★ **`n_ctx` 는 미리 다 잡힌다.** 쓴 만큼이 아니다. 그래서 아래에서 자리를
+      볼 때 재는 게 아니라 그냥 세면 된다 — transformers 때는 남은 VRAM 으로
+      추정했고, 그 추정이 어텐션 행렬을 못 봐서 틀렸다.
     """
-    calls = []
-    for i, m in enumerate(CALL.finditer(text)):
-        try:
-            got = json.loads(m.group(1))
-        except ValueError:
-            continue
-        calls.append(
-            {
-                "id": f"call_{i}",
-                "type": "function",
-                "function": {
-                    "name": got.get("name") or "",
-                    "arguments": json.dumps(got.get("arguments") or {}, ensure_ascii=False),
-                },
-            }
-        )
-    return CALL.sub("", text).strip(), calls
+    from llama_cpp import Llama
+
+    global LLM, NAME, NCTX
+    NAME = os.path.basename(model_path)
+    NCTX = n_ctx
+    types = {"f16": 1, "q8_0": 8, "q4_0": 2}
+    LLM = Llama(
+        model_path=model_path,
+        n_ctx=n_ctx,
+        n_gpu_layers=n_gpu_layers,
+        n_batch=512,
+        n_ubatch=512,
+        flash_attn=True,
+        type_k=types[kv_type],
+        type_v=types[kv_type],
+        swa_full=False,
+        verbose=False,
+    )
+    print(f"  올렸다 — {NAME} · ctx {n_ctx:,} · KV {kv_type} · VRAM {vram()}", flush=True)
+    return LLM
+
+
+# ── 도구 호출을 꺼내는 자리 ────────────────────────────────────────────────
+#
+# ★ **모델마다 모양이 다르다.** 전에는 Qwen3 의 JSON 하나만 알았다. 후보들을
+#   재면서 셋이 나왔다(2026-09-01 실측):
+#
+#     Qwen3      <tool_call>{"name":…,"arguments":{…}}</tool_call>        JSON
+#     Qwen3.5    <tool_call><function=이름><parameter=키>값</parameter>…   XML 식
+#     Gemma-4    <|tool_call>call:이름{키:<|"|>값<|"|>}<tool_call|>        자체 문법
+#
+# ★ **못 읽는 것은 버리지 않고 글로 남긴다.** 여기서 버리면 그 판이 아무 말도
+#   없이 끝난다. `adapters/local.py` 첫머리가 같은 것을 짚어 뒀다 — 도구 결과를
+#   글로 뭉개도 요청은 200 으로 돌아오고, 모델은 자기가 부른 도구가 무엇을
+#   냈는지 모른 채 답한다.
+#
+# 시험은 princess 의 `coord/bench/test_toolparse.py` 에 있다. **실제로 받은
+# 출력**을 그대로 쓴다 — 모양을 상상해서 짜면 그 자리가 조용히 어긋난다.
+
+_QWEN3 = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.S)
+_Q35_CALL = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.S)
+_Q35_FUNC = re.compile(r"<function=([^>\s]+)>\s*(.*?)\s*</function>", re.S)
+_Q35_PARAM = re.compile(r"<parameter=([^>\s]+)>\s*(.*?)\s*</parameter>", re.S)
+
+_G4_STR = '<|"|>'
+_G4_CALL = re.compile(r"<\|tool_call>\s*call:([^\s{]+)\{(.*?)\}<tool_call\|>", re.S)
+# 껍데기 없이 맨몸으로 낼 때가 있다(실측). 문자열 표시가 든 `이름{...}` 도 받는다 —
+# 그 표시는 보통 글에 안 나온다.
+_G4_BARE = re.compile(
+    r"(?:^|[\s\n])([a-z_][a-z0-9_]*)\{((?:[^{}]*?" + re.escape(_G4_STR) + r"[^{}]*?)+)\}")
+# 사고 채널. **답에 실리면 오빠가 읽는다.**
+_G4_THOUGHT = re.compile(r"<\|channel>thought.*?(?:<channel\|>|$)", re.S)
+
+
+def _coerce(value: str, schema: dict | None, key: str):
+    """글자를 스키마가 말하는 타입으로 되돌린다.
+
+    ★ Qwen3.5 는 인자를 전부 글자로 낸다(`<parameter=limit>` 안에 "5"). 안
+      되돌리면 int 를 기대하는 자리에 글자가 간다.
+    """
+    if not schema:
+        return value
+    t = ((schema.get("properties") or {}).get(key) or {}).get("type")
+    try:
+        if t == "integer":
+            return int(value)
+        if t == "number":
+            return float(value)
+        if t == "boolean":
+            return value.strip().lower() in ("true", "1", "yes")
+        if t == "array":
+            return json.loads(value) if value.strip().startswith("[") else [value]
+        if t == "object":
+            return json.loads(value)
+    except (ValueError, TypeError):
+        return value  # 못 되돌리면 글자로 둔다. 예외를 내면 그 턴이 통째로 죽는다
+    return value
+
+
+def _g4_args(body: str) -> dict:
+    """Gemma-4 의 인자 문법. `키:<|"|>글자<|"|>` · `키:[…]` · `키:123`."""
+    out: dict = {}
+    i, n = 0, len(body)
+    while i < n:
+        m = re.compile(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*:").match(body, i)
+        if not m:
+            break
+        key, i = m.group(1), m.end()
+        if body.startswith(_G4_STR, i):
+            j = body.find(_G4_STR, i + len(_G4_STR))
+            if j < 0:
+                break
+            out[key] = body[i + len(_G4_STR):j]
+            i = j + len(_G4_STR)
+        elif body.startswith("[", i):
+            depth, j = 0, i
+            while j < n:
+                if body[j] == "[":
+                    depth += 1
+                elif body[j] == "]":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            out[key] = re.findall(
+                re.escape(_G4_STR) + r"(.*?)" + re.escape(_G4_STR), body[i + 1:j], re.S)
+            i = j + 1
+        else:
+            m2 = re.compile(r"([^,}]*)").match(body, i)
+            raw = (m2.group(1) or "").strip()
+            for cast in (int, float):
+                try:
+                    out[key] = cast(raw)
+                    break
+                except ValueError:
+                    continue
+            else:
+                out[key] = {"true": True, "false": False}.get(raw.lower(), raw)
+            i = m2.end()
+        m3 = re.compile(r"\s*,\s*").match(body, i)
+        i = m3.end() if m3 else i
+    return out
+
+
+def 부른것(text: str, schemas: dict | None = None) -> tuple[str, list[dict]]:
+    """(도구 부분을 뺀 글, OpenAI 모양의 tool_calls)."""
+    calls: list[dict] = []
+
+    def _add(name: str, args: dict):
+        calls.append({
+            "id": f"call_{len(calls)}",
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)},
+        })
+
+    text = _G4_THOUGHT.sub("", text)
+    rest = text
+
+    for m in _G4_CALL.finditer(text):
+        _add(m.group(1), _g4_args(m.group(2)))
+    if calls:
+        rest = _G4_CALL.sub("", text)
+    else:
+        for m in _G4_BARE.finditer(text):
+            _add(m.group(1), _g4_args(m.group(2)))
+        if calls:
+            rest = _G4_BARE.sub("", text)
+
+    if not calls:
+        for m in _QWEN3.finditer(text):
+            try:
+                got = json.loads(m.group(1))
+            except ValueError:
+                continue
+            _add(got.get("name") or "", got.get("arguments") or {})
+        if calls:
+            rest = _QWEN3.sub("", text)
+
+    if not calls:
+        for m in _Q35_CALL.finditer(text):
+            for fm in _Q35_FUNC.finditer(m.group(1)):
+                name = fm.group(1)
+                sch = (schemas or {}).get(name)
+                _add(name, {k: _coerce(v, sch, k)
+                            for k, v in _Q35_PARAM.findall(fm.group(2))})
+        if calls:
+            rest = _Q35_CALL.sub("", text)
+
+    # 답과 도구가 한 턴에 같이 올 때 Gemma-4 는 <turn|> 로 가른다
+    rest = rest.replace("<turn|>", "\n").replace("<end_of_turn>", "")
+    return rest.strip(), calls
 
 
 class TooBig(RuntimeError):
-    """이 카드에 안 들어간다. **죽는 대신 돌려보낸다.**"""
+    """이 자리에 안 들어간다. **죽는 대신 돌려보낸다.**"""
 
 
-def kv_bytes_per_token() -> int:
-    """토큰 하나가 KV 캐시에서 먹는 바이트. 모델 설정에서 그대로 읽는다."""
-    c = MODEL.config
-    층 = c.num_hidden_layers
-    헤드 = getattr(c, "num_key_value_heads", None) or c.num_attention_heads
-    폭 = getattr(c, "head_dim", None) or (c.hidden_size // c.num_attention_heads)
-    return 2 * 층 * 헤드 * 폭 * 2  # K·V × fp16
+def _render(messages: list[dict], tools: list | None) -> str:
+    """템플릿을 그대로 태워 프롬프트를 만든다. **토큰을 세려고 먼저 한 번 한다.**
 
-
-def budget_tokens(more: int) -> int:
-    """지금 남은 VRAM 으로 몇 토큰까지 되나.
-
-    ★ **고정값을 안 쓴다.** 임베더가 올라와 있으면 자리가 절반으로 준다.
-      부를 때 재면 카드를 바꾸든 모델을 바꾸든 저절로 따라간다.
+    ★ 도구 목록은 템플릿에 맡긴다. 모델마다 그 자리 모양이 다르고, 손으로
+      적으면 모델을 갈아 끼울 때마다 여기가 틀린다.
     """
-    import torch
+    from llama_cpp.llama_chat_format import Jinja2ChatFormatter
 
-    if not torch.cuda.is_available():
-        return FLOOR_TOKENS
-    전체 = torch.cuda.get_device_properties(0).total_memory
-    쓴것 = torch.cuda.memory_reserved(0)
-    남은 = max(전체 - 쓴것, 0) * KV_SHARE
-    return max(int(남은 / kv_bytes_per_token()) - more, FLOOR_TOKENS)
+    tmpl = LLM.metadata.get("tokenizer.chat_template") or ""
+    fmt = Jinja2ChatFormatter(template=tmpl, eos_token="", bos_token="")
+    kw = {"tools": tools} if tools else {}
+    return fmt(messages=messages, **kw).prompt
 
 
 def generate(messages: list[dict], max_tokens: int, temperature: float,
              tools: list | None = None) -> dict:
-    """한 번 만든다. **끝나면 캐시를 비운다.**
+    """한 번 만든다.
 
-    ★ 안 비우면 KV 캐시 조각이 쌓인다. 실측(2026-08-31): 20호출을 돌리고 나니
-      가중치가 2.49GB 인데 VRAM 이 **5,933 / 6,144 MiB** 였고, 속도가 6.6 →
-      0.3 tok/s 로 떨어지다 한 호출이 **833초**를 썼다. 카드가 작을수록
-      "언젠가 알아서 정리되겠지" 가 안 통한다.
+    ★ **비우지 않는다.** transformers 때는 매 호출 끝에 `empty_cache()` 를 했다
+      (조각이 쌓여 실제로 0.3 tok/s 까지 떨어졌다). llama.cpp 는 KV 를 미리
+      잡아 두고 **접두사를 재사용한다** — 여기서 비우면 그 이득이 사라진다.
+      실측: 접두사 76,000 토큰을 물고 있으면 새 입력 400 토큰 프리필이 0.26초,
+      한 턴이 13.6초다. 안 물고 있으면 그 한 턴이 59초부터 시작한다.
+
+    ★ 유나·예나의 프롬프트는 이미 접두사 캐시를 전제로 짜여 있다(안 변하는 것이
+      앞, 매 턴 바뀌는 사실관계는 messages 끝). 클라우드에서 캐시가 입력의
+      77% 를 먹는 것이 그 증거고, 여기서도 같이 먹는다.
     """
-    import torch
-
     with LOCK:
-        # ★ **도구 목록은 템플릿에 맡긴다.** 모델마다 그 자리 모양이 다르고,
-        #   손으로 적으면 모델을 갈아 끼울 때마다 여기가 틀린다.
-        kw = {"tools": tools} if tools else {}
-        text = TOK.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True, **kw
-        )
-        ins = TOK(text, return_tensors="pt").to(MODEL.device)
-        n_in = ins.input_ids.shape[-1]
-        # ★ **안 들어가면 만들기 전에 돌려보낸다.** 넘치면 bitsandbytes 가
-        #   C 쪽에서 중단해 프로세스가 통째로 죽고, 그러면 임베딩까지 멈춘다.
-        여유 = budget_tokens(max_tokens)
-        if n_in > 여유 and EMB is not None:
-            # ★ **자리를 먼저 만들어 본다.** 임베더가 2.3GB 를 쥐고 있으면
-            #   생성이 쓸 자리가 절반으로 준다(실측: 15,080 → 7,144 토큰).
-            #   임베딩은 다음에 부를 때 다시 올리면 되지만, 여기서 거절하면
-            #   그 판단은 클라우드로 넘어가고 다시 안 온다.
-            unload_embedder()
-            여유 = budget_tokens(max_tokens)
-        if n_in > 여유:
-            del ins
+        prompt = _render(messages, tools)
+        n_in = len(LLM.tokenize(prompt.encode("utf-8"), add_bos=True, special=True))
+        # ★ **안 들어가면 만들기 전에 돌려보낸다.** `n_ctx` 는 미리 잡혀 있어서
+        #   재는 게 아니라 세면 된다.
+        if n_in + max_tokens > NCTX:
             raise TooBig(
-                f"프롬프트가 {n_in:,} 토큰인데 지금 이 카드에 들어가는 것은 "
-                f"약 {여유:,} 토큰이다(KV 캐시 토큰당 "
-                f"{kv_bytes_per_token() // 1024}KB)"
-            )
-        try:
-            with torch.no_grad():
-                out = MODEL.generate(
-                    **ins,
-                    max_new_tokens=max_tokens,
-                    # ★ 온도 0 이면 표집을 끈다. 정해진 모양의 JSON 을 내는
-                    #   자리라 다양성이 값이 아니다.
-                    do_sample=temperature > 0,
-                    temperature=temperature or None,
-                    top_p=0.9 if temperature > 0 else None,
-                    pad_token_id=TOK.eos_token_id,
-                )
-            새것 = out[0][n_in:].clone()
-            끝났나 = 새것.shape[-1] < max_tokens
-            말, 부름 = 부른것(TOK.decode(새것, skip_special_tokens=True))
-            got = {
-                "text": 말,
-                "calls": 부름,
-                "in": n_in,
-                "out": int(새것.shape[-1]),
-                # 부른 것이 있으면 그게 멈춘 이유다 — 루프가 그걸 보고 돈다.
-                "finish": "tool_calls" if 부름 else ("stop" if 끝났나 else "length"),
-            }
-        finally:
-            # `locals().pop(...)` 은 아무것도 안 지운다 — CPython 에서
-            # `locals()` 는 사본이다. 이름을 직접 지워야 참조가 풀린다.
-            out = ins = 새것 = None
-            del out, ins, 새것
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        return got
+                f"프롬프트가 {n_in:,} 토큰인데 답 {max_tokens:,} 를 더하면 "
+                f"이 자리의 {NCTX:,} 를 넘는다")
+
+        schemas = {t["function"]["name"]: t["function"].get("parameters")
+                   for t in (tools or []) if t.get("function")}
+        r = LLM.create_chat_completion(
+            messages=messages,
+            tools=tools or None,
+            tool_choice="auto" if tools else None,
+            max_tokens=max_tokens,
+            # 온도 0 이면 표집을 좁힌다. 정해진 모양을 내는 자리라 다양성이
+            # 값이 아니다. 0 이 아니면 Gemma-4 권장값으로 간다.
+            temperature=temperature,
+            top_p=0.95 if temperature > 0 else 1.0,
+            top_k=64 if temperature > 0 else 1,
+            # ★ 권장값이 1.0 이다. 라이브러리 기본값 1.1 로 돌리면 말이 무너진다 —
+            #   후보를 재다가 이걸로 한 모델을 불리하게 쟀다.
+            repeat_penalty=1.0,
+            stream=False,
+        )
+        choice = r["choices"][0]
+        m = choice.get("message") or {}
+        말, 부름 = 부른것(m.get("content") or "", schemas)
+        # 라이브러리가 스스로 뽑아낸 것이 있으면 그것도 받는다
+        if not 부름 and m.get("tool_calls"):
+            부름 = m["tool_calls"]
+        usage = r.get("usage") or {}
+        끝났나 = choice.get("finish_reason") != "length"
+        return {
+            "text": 말,
+            "calls": 부름,
+            "in": int(usage.get("prompt_tokens") or n_in),
+            "out": int(usage.get("completion_tokens") or 0),
+            # 부른 것이 있으면 그게 멈춘 이유다 — 루프가 그걸 보고 돈다.
+            "finish": "tool_calls" if 부름 else ("stop" if 끝났나 else "length"),
+        }
 
 
 def load_embedder(model_id: str):
@@ -231,7 +401,7 @@ def load_embedder(model_id: str):
     ★ **채팅 자물쇠를 같이 쓴다.** 6GB 에서 둘이 동시에 돌면 OOM 이고, 그 OOM 은
       답하는 쪽을 죽인다. 부르는 쪽이 이미 `LOCK` 을 쥐고 들어온다.
     """
-    import torch
+    import torch  # noqa: F401  (여기서 CUDA 가 잡혀 있어야 아래 .to("cuda") 가 산다)
     from transformers import AutoModel, AutoTokenizer
 
     global EMB, EMB_TOK, EMB_NAME
@@ -242,9 +412,7 @@ def load_embedder(model_id: str):
     EMB_TOK = AutoTokenizer.from_pretrained(model_id)
     EMB = AutoModel.from_pretrained(model_id, dtype=torch.float16).to("cuda").eval()
     EMB_NAME = model_id
-    if torch.cuda.is_available():
-        print(f"  임베더 올렸다 — VRAM {torch.cuda.memory_allocated() / 1024**3:.2f}GB",
-              flush=True)
+    print(f"  임베더 올렸다 — VRAM {vram()}", flush=True)
     return EMB
 
 
@@ -320,7 +488,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
         # 어댑터의 `available()` 은 포트만 두드리지만, 사람이 눌러 볼 자리도 둔다.
         if self.path.rstrip("/") in ("/health", "/v1/models"):
-            self._send(200, {"status": "ok", "model": NAME})
+            self._send(200, {"status": "ok", "model": NAME, "n_ctx": NCTX})
         else:
             self._send(404, {"error": "없는 자리"})
 
@@ -359,19 +527,11 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         걸린 = time.time() - t0
-        쓴것 = ""
-        try:
-            import torch
-
-            if torch.cuda.is_available():
-                쓴것 = f" · VRAM {torch.cuda.memory_reserved() / 1024**3:.2f}GB"
-        except Exception:  # noqa: BLE001
-            pass
-        # ★ VRAM 을 같이 찍는다. 이 수가 조용히 자라는 것이 이 물건이
-        #   느려지는 방식이라, 안 찍으면 느려진 뒤에야 안다.
         부름 = got.get("calls") or []
-        print(f"  {got['in']:>5}→{got['out']:<5} 토큰 · {걸린:5.1f}초 "
-              f"· {got['out'] / max(걸린, 0.01):4.1f} tok/s · {got['finish']}{쓴것}"
+        # ★ VRAM 을 같이 찍는다. 이 수가 조용히 자라는 것이 이 물건이 느려지는
+        #   방식이라, 안 찍으면 느려진 뒤에야 안다.
+        print(f"  {got['in']:>6}→{got['out']:<5} 토큰 · {걸린:5.1f}초 "
+              f"· {got['out'] / max(걸린, 0.01):4.1f} tok/s · {got['finish']} · {vram()}"
               + (f" · {' '.join(c['function']['name'] for c in 부름)}" if 부름 else ""),
               flush=True)
         말 = {"role": "assistant", "content": got["text"]}
@@ -417,18 +577,33 @@ class Handler(BaseHTTPRequestHandler):
         pass  # 우리가 위에서 한 줄로 찍는다
 
 
+# 유나·예나가 고른 모델이다(2026-09-01). 고른 근거는 princess 의 `coord/RUNTIME.md`.
+#   어체가 무너지는 비율 1/48(2%) · 회상에 뭐가 있었는지 정확히 읽는다 · voice_reply 3/8
+#   후보였던 Qwen3.5-4B 는 도구가 5/5 로 보였으나, 도구 설명이 요구하는 조건을
+#   채워 다시 재니 2/8 이었고 어체 붕괴가 5/48(10%) 이었다.
+DEFAULT_MODEL = os.path.expanduser(
+    "~/.cache/huggingface/hub/models--unsloth--gemma-4-E4B-it-qat-GGUF/snapshots"
+    "/8c5a9e4fd5482e2be20fe0bf013b4c262a8f4265/gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf")
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--model", default="Qwen/Qwen3-4B-Instruct-2507")
+    p.add_argument("--model", default=DEFAULT_MODEL, help="gguf 경로")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8080)
-    p.add_argument("--bits", type=int, default=4, choices=[4, 16],
-                   help="4 = bitsandbytes NF4 (6GB 짜리 카드의 기본값)")
-    p.add_argument("--device", default="cuda:0")
+    # ★ 대화 프롬프트가 6만~7.7만 토큰이다(`coord/COST.md`). 76,800 은 그 위다.
+    #   깨어남 접두사까지 같이 물리려면 153,600 인데, f16 으로 5,737MiB 라 여유가
+    #   얇다 — 그때는 `--kv q8_0` 으로 4,717MiB 가 된다(둘 다 실측).
+    p.add_argument("--n-ctx", type=int, default=76800)
+    p.add_argument("--kv", default="f16", choices=["f16", "q8_0", "q4_0"])
+    p.add_argument("--n-gpu-layers", type=int, default=-1, help="-1 = 전부 GPU")
     args = p.parse_args()
 
-    print(f"  {args.model} · {args.bits}bit · {args.device} — 올리는 중", flush=True)
-    load(args.model, args.bits, args.device)
+    if not os.path.exists(args.model):
+        print(f"  가중치가 없다: {args.model}", file=sys.stderr)
+        return 1
+    print(f"  {os.path.basename(args.model)} — 올리는 중", flush=True)
+    load(args.model, args.n_ctx, args.n_gpu_layers, args.kv)
     print(f"  http://{args.host}:{args.port}/v1/chat/completions 에서 듣는다", flush=True)
     print(f"  http://{args.host}:{args.port}/v1/embeddings 도 같은 자리다 "
           f"({EMB_DEFAULT} — 부를 때 올린다)", flush=True)
