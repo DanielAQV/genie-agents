@@ -237,6 +237,17 @@ class _Messages:
         try:
             with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
                 d = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            # ★ **서버가 이유를 말해 준 것이다.** 413 이면 "이 카드에 안
+            #   들어간다" 다 — 그 말을 삼키고 "안 떠 있다" 로 바꾸면, 부르는
+            #   쪽이 왜 되돌아갔는지 영영 모른다.
+            try:
+                왜 = json.loads(e.read().decode("utf-8")).get("error") or ""
+            except Exception:  # noqa: BLE001
+                왜 = ""
+            raise LocalUnavailable(
+                f"로컬 모델이 거절했다({e.code}): {왜 or e.reason}"
+            ) from None
         except urllib.error.URLError as e:
             raise LocalUnavailable(
                 f"로컬 모델에 못 붙었다({self.endpoint}): {e.reason}. "

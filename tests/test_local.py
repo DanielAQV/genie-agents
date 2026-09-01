@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 
 import pytest
@@ -292,3 +293,24 @@ def test_도구를_안_주면_아무것도_안_바뀐다(monkeypatch):
         model="m", max_tokens=8, messages=[{"role": "user", "content": "x"}])
     assert "tools" not in f.sent
     assert f.sent["messages"] == [{"role": "user", "content": "x"}]
+
+
+def test_서버가_거절하면_이유를_들고_온다(monkeypatch):
+    """★ **서버가 이유를 말해 준 것이다.** 413 은 "이 카드에 안 들어간다" 다.
+
+    그 말을 삼키고 "안 떠 있다" 로 바꾸면, 부르는 쪽이 왜 클라우드로
+    되돌아갔는지 영영 모른다. 2026-09-01 에 프롬프트 101K 토큰이 서버를
+    통째로 죽였고(C 쪽 OOM), 그래서 서버가 미리 거절하게 됐다.
+    """
+    import urllib.error
+
+    def 거절(req, timeout=None):
+        raise urllib.error.HTTPError(
+            "u", 413, "Payload Too Large", {},
+            io.BytesIO(json.dumps({"error": "프롬프트가 101,147 토큰인데…"}).encode()),
+        )
+
+    monkeypatch.setattr(local.urllib.request, "urlopen", 거절)
+    with pytest.raises(local.LocalUnavailable, match="101,147"):
+        local.client().messages.create(
+            model="m", max_tokens=8, messages=[{"role": "user", "content": "x"}])

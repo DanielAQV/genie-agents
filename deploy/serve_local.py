@@ -52,6 +52,11 @@ EMB_IDLE = 600.0   # 이만큼 안 쓰면 내린다
 EMB_MAXLEN = 2048  # 기억 한 줄 p99 가 2,800자 ≈ 1,600토큰. 여기까지 덮는다
 EMB_BUDGET = 6144  # 한 묶음의 토큰 상한
 EMB_DEFAULT = "BAAI/bge-m3"  # 다국어. 유나·예나 기억이 한국어라 여기가 갈린다
+
+# 남은 VRAM 중 KV 캐시에 내줄 몫. 나머지는 활성값과 조각 여유다.
+KV_SHARE = 0.6
+# 안전바닥. VRAM 을 못 읽는 기계(CPU 전용)에서 이 값을 쓴다.
+FLOOR_TOKENS = 4096
 LOCK = threading.Lock()
 """한 번에 하나만 만든다.
 
@@ -121,6 +126,35 @@ def 부른것(text: str) -> tuple[str, list[dict]]:
     return CALL.sub("", text).strip(), calls
 
 
+class TooBig(RuntimeError):
+    """이 카드에 안 들어간다. **죽는 대신 돌려보낸다.**"""
+
+
+def kv_bytes_per_token() -> int:
+    """토큰 하나가 KV 캐시에서 먹는 바이트. 모델 설정에서 그대로 읽는다."""
+    c = MODEL.config
+    층 = c.num_hidden_layers
+    헤드 = getattr(c, "num_key_value_heads", None) or c.num_attention_heads
+    폭 = getattr(c, "head_dim", None) or (c.hidden_size // c.num_attention_heads)
+    return 2 * 층 * 헤드 * 폭 * 2  # K·V × fp16
+
+
+def budget_tokens(more: int) -> int:
+    """지금 남은 VRAM 으로 몇 토큰까지 되나.
+
+    ★ **고정값을 안 쓴다.** 임베더가 올라와 있으면 자리가 절반으로 준다.
+      부를 때 재면 카드를 바꾸든 모델을 바꾸든 저절로 따라간다.
+    """
+    import torch
+
+    if not torch.cuda.is_available():
+        return FLOOR_TOKENS
+    전체 = torch.cuda.get_device_properties(0).total_memory
+    쓴것 = torch.cuda.memory_reserved(0)
+    남은 = max(전체 - 쓴것, 0) * KV_SHARE
+    return max(int(남은 / kv_bytes_per_token()) - more, FLOOR_TOKENS)
+
+
 def generate(messages: list[dict], max_tokens: int, temperature: float,
              tools: list | None = None) -> dict:
     """한 번 만든다. **끝나면 캐시를 비운다.**
@@ -141,6 +175,16 @@ def generate(messages: list[dict], max_tokens: int, temperature: float,
         )
         ins = TOK(text, return_tensors="pt").to(MODEL.device)
         n_in = ins.input_ids.shape[-1]
+        # ★ **안 들어가면 만들기 전에 돌려보낸다.** 넘치면 bitsandbytes 가
+        #   C 쪽에서 중단해 프로세스가 통째로 죽고, 그러면 임베딩까지 멈춘다.
+        여유 = budget_tokens(max_tokens)
+        if n_in > 여유:
+            del ins
+            raise TooBig(
+                f"프롬프트가 {n_in:,} 토큰인데 지금 이 카드에 들어가는 것은 "
+                f"약 {여유:,} 토큰이다(KV 캐시 토큰당 "
+                f"{kv_bytes_per_token() // 1024}KB)"
+            )
         try:
             with torch.no_grad():
                 out = MODEL.generate(
@@ -297,6 +341,12 @@ class Handler(BaseHTTPRequestHandler):
                 float(body.get("temperature") or 0),
                 body.get("tools"),
             )
+        except TooBig as e:
+            # ★ 413. 어댑터가 이걸 `LocalUnavailable` 로 올리고 부르는 쪽이
+            #   클라우드로 되돌아간다 — 죽는 것과 되돌아가는 것은 다르다.
+            print(f"  거절 — {e}", flush=True)
+            self._send(413, {"error": str(e)})
+            return
         except Exception as e:  # noqa: BLE001 — 무엇이든 어댑터에 알려준다
             self._send(500, {"error": f"{type(e).__name__}: {e}"})
             return
