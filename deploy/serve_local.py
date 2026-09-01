@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -78,7 +79,39 @@ def load(model_id: str, bits: int, device: str):
     return MODEL
 
 
-def generate(messages: list[dict], max_tokens: int, temperature: float) -> dict:
+# Qwen3 가 도구를 부를 때 내는 모양. 특수 토큰이 아니라 그냥 글자라
+# `skip_special_tokens=True` 로 풀어도 그대로 남는다.
+CALL = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.S)
+
+
+def 부른것(text: str) -> tuple[str, list[dict]]:
+    """(도구 부분을 뺀 글, OpenAI 모양의 tool_calls).
+
+    ★ **못 읽는 것은 글로 남긴다.** 4B 는 JSON 을 어긋나게 낼 때가 있는데,
+      여기서 버리면 그 판이 아무 말도 없이 끝난다. 어댑터가 빈 인자로
+      부르고 도구 쪽에서 받아 내게 두는 편이 낫다.
+    """
+    calls = []
+    for i, m in enumerate(CALL.finditer(text)):
+        try:
+            got = json.loads(m.group(1))
+        except ValueError:
+            continue
+        calls.append(
+            {
+                "id": f"call_{i}",
+                "type": "function",
+                "function": {
+                    "name": got.get("name") or "",
+                    "arguments": json.dumps(got.get("arguments") or {}, ensure_ascii=False),
+                },
+            }
+        )
+    return CALL.sub("", text).strip(), calls
+
+
+def generate(messages: list[dict], max_tokens: int, temperature: float,
+             tools: list | None = None) -> dict:
     """한 번 만든다. **끝나면 캐시를 비운다.**
 
     ★ 안 비우면 KV 캐시 조각이 쌓인다. 실측(2026-08-31): 20호출을 돌리고 나니
@@ -89,7 +122,12 @@ def generate(messages: list[dict], max_tokens: int, temperature: float) -> dict:
     import torch
 
     with LOCK:
-        text = TOK.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        # ★ **도구 목록은 템플릿에 맡긴다.** 모델마다 그 자리 모양이 다르고,
+        #   손으로 적으면 모델을 갈아 끼울 때마다 여기가 틀린다.
+        kw = {"tools": tools} if tools else {}
+        text = TOK.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True, **kw
+        )
         ins = TOK(text, return_tensors="pt").to(MODEL.device)
         n_in = ins.input_ids.shape[-1]
         try:
@@ -106,11 +144,14 @@ def generate(messages: list[dict], max_tokens: int, temperature: float) -> dict:
                 )
             새것 = out[0][n_in:].clone()
             끝났나 = 새것.shape[-1] < max_tokens
+            말, 부름 = 부른것(TOK.decode(새것, skip_special_tokens=True))
             got = {
-                "text": TOK.decode(새것, skip_special_tokens=True),
+                "text": 말,
+                "calls": 부름,
                 "in": n_in,
                 "out": int(새것.shape[-1]),
-                "finish": "stop" if 끝났나 else "length",
+                # 부른 것이 있으면 그게 멈춘 이유다 — 루프가 그걸 보고 돈다.
+                "finish": "tool_calls" if 부름 else ("stop" if 끝났나 else "length"),
             }
         finally:
             # `locals().pop(...)` 은 아무것도 안 지운다 — CPython 에서
@@ -155,6 +196,7 @@ class Handler(BaseHTTPRequestHandler):
                 body.get("messages") or [],
                 int(body.get("max_tokens") or 512),
                 float(body.get("temperature") or 0),
+                body.get("tools"),
             )
         except Exception as e:  # noqa: BLE001 — 무엇이든 어댑터에 알려준다
             self._send(500, {"error": f"{type(e).__name__}: {e}"})
@@ -171,13 +213,17 @@ class Handler(BaseHTTPRequestHandler):
             pass
         # ★ VRAM 을 같이 찍는다. 이 수가 조용히 자라는 것이 이 물건이
         #   느려지는 방식이라, 안 찍으면 느려진 뒤에야 안다.
+        부름 = got.get("calls") or []
         print(f"  {got['in']:>5}→{got['out']:<5} 토큰 · {걸린:5.1f}초 "
-              f"· {got['out'] / max(걸린, 0.01):4.1f} tok/s · {got['finish']}{쓴것}",
+              f"· {got['out'] / max(걸린, 0.01):4.1f} tok/s · {got['finish']}{쓴것}"
+              + (f" · {' '.join(c['function']['name'] for c in 부름)}" if 부름 else ""),
               flush=True)
+        말 = {"role": "assistant", "content": got["text"]}
+        if 부름:
+            말["tool_calls"] = 부름
         self._send(200, {
             "id": "local", "object": "chat.completion", "model": NAME,
-            "choices": [{"index": 0, "finish_reason": got["finish"],
-                         "message": {"role": "assistant", "content": got["text"]}}],
+            "choices": [{"index": 0, "finish_reason": got["finish"], "message": 말}],
             "usage": {"prompt_tokens": got["in"], "completion_tokens": got["out"],
                       "total_tokens": got["in"] + got["out"]},
         })
