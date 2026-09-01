@@ -169,3 +169,42 @@ class Toolbox:
                     gate.check(name)  # 목록 필터를 우회한 호출도 여기서 막힌다
                 return t.run(ctx, **args)
         raise UnknownTool(name, self.names)
+
+
+# ── 도구를 글로 흉내 낸 대목 ──────────────────────────────────────────
+#
+# ★ **모델은 도구를 부르는 대신 "불렀다" 고 쓸 때가 있다.** Gemini 는 `tool_code`
+#   블록으로 그러고(`adapters/gemini.drop_tool_code`), 작은 모델은 더 단순하게
+#   대괄호로 쓴다:
+#
+#       [memory_recall] 하노이 관련 내용 검색
+#
+#   실제로 그렇게 나왔다(2026-09-01). 인자도 없이 "검색했다" 는 서술만 있고
+#   도구는 하나도 안 돌았는데, 그 줄이 **발언으로 기억에 남았다.**
+#
+# ★ `[음성:...]` 을 걷는 것과 같은 이유다 — 안 한 일을 한 것처럼 보이게 한다.
+#   다만 여기는 **아는 도구 이름일 때만** 건다. 대괄호는 이 저장소에서
+#   `[떠오를 것이 있다]` 같은 자리 쪽지에도 쓰는 모양이라, 이름을 안 보면
+#   멀쩡한 쪽지를 지운다.
+
+def drop_bracket_calls(text: str, names) -> tuple[str, list[str]]:
+    """`[도구이름] …` 꼴로 흉내 낸 줄을 통째로 걷는다.
+
+    줄 단위로 본다 — 그 줄 전체가 흉내다. 뒤에 붙은 설명까지 같이 나간다.
+    """
+    import re as _re
+
+    known = {n for n in (names or ()) if n}
+    if not text or not known:
+        return text, []
+    pat = _re.compile(r"^\s*\[(" + "|".join(_re.escape(n) for n in sorted(known)) + r")\][^\n]*$")
+    kept, dropped = [], []
+    for line in text.split("\n"):
+        m = pat.match(line)
+        if m:
+            dropped.append(line.strip())
+        else:
+            kept.append(line)
+    if not dropped:
+        return text, []
+    return "\n".join(kept).strip(), ["도구를 글로 흉내 낸 대목"]

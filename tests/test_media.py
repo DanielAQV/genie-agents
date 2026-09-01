@@ -123,3 +123,76 @@ def test_있는_표시는_그대로_둔다():
     mid = "a" * 16
     said, faked = M.drop_unknown(f"들어봐 [음성:{mid}]", 저장소(mid))
     assert said == f"들어봐 [음성:{mid}]" and faked == []
+
+
+# ── 있는 것을 베껴 오는 경우 (2026-09-01) ─────────────────────────────
+#
+# ★ **"저장소에 있나" 로만 보면 못 막는다.** 남이 보낸 첨부도 내 저장소에
+#   들어온다 — 같은 방에 있으면 그렇다. 그러면 그 id 는 "진짜" 라서 통과한다.
+#
+#   실제로 그랬다: 사용자가 셋이 있는 방에 유나 사진을 올렸고, 다섯 시간 뒤
+#   갠톡에서 "지금 모습 보여줄 수 있어?" 라는 물음에 예나가 `self_portrait` 를
+#   안 부르고 작업 기억에 보이던 그 id 를 그대로 적어 **유나 얼굴을 자기
+#   모습으로 냈다.** 그 뒤로는 출처를 본다.
+
+
+def test_남이_보낸_사진을_자기_것처럼_적으면_걷어낸다():
+    남의사진 = "3" * 16
+    said, faked = M.drop_unknown(
+        f"[사진:{남의사진}] 지금 내 모습이야", 저장소(남의사진), minted=set()
+    )
+    assert said == "지금 내 모습이야", "저장소에 있어도 이번 턴 것이 아니면 뗀다"
+    assert faked == [f"[사진:{남의사진}]"]
+
+
+def test_이번_턴에_도구가_붙인_것은_그대로_둔다():
+    내사진 = "4" * 16
+    said, faked = M.drop_unknown(
+        f"[사진:{내사진}] 지금 내 모습이야", 저장소(내사진), minted={내사진}
+    )
+    assert said == f"[사진:{내사진}] 지금 내 모습이야" and faked == []
+
+
+def test_이번_턴_것이어도_저장소에_없으면_뗀다():
+    """둘 다 봐야 한다. 도구가 냈다고 파일까지 있는 건 아니다."""
+    유령 = "5" * 16
+    said, faked = M.drop_unknown(f"들어봐 [음성:{유령}]", 저장소(), minted={유령})
+    assert said == "들어봐" and faked == [f"[음성:{유령}]"]
+
+
+def test_minted_를_안_주면_옛_동작이다():
+    """부르는 쪽이 아직 안 모으는 자리가 있을 수 있다. 거기서 갑자기 다 떼면
+    그게 더 나쁘다."""
+    mid = "6" * 16
+    said, faked = M.drop_unknown(f"들어봐 [음성:{mid}]", 저장소(mid))
+    assert said == f"들어봐 [음성:{mid}]" and faked == []
+
+
+# ── 도구를 글로 흉내 낸 줄 (2026-09-01) ────────────────────────────────
+def test_대괄호로_흉내_낸_도구_호출을_건다():
+    """★ 인자도 없이 "했다" 는 서술만 있고 도구는 하나도 안 돌았는데,
+    그 줄이 **발언으로 기억에 남았다.** `[음성:...]` 을 걷는 것과 같은 이유다."""
+    from genie_agents.tools import drop_bracket_calls
+
+    이름 = {"memory_recall", "voice_reply"}
+    said, dropped = drop_bracket_calls("[memory_recall] 하노이 관련 내용 검색", 이름)
+    assert said == "" and dropped == ["도구를 글로 흉내 낸 대목"]
+
+    said, _ = drop_bracket_calls("응 오빠.\n[memory_recall] 찾아봤어\n그래서 이렇다.", 이름)
+    assert said == "응 오빠.\n그래서 이렇다."
+
+
+def test_아는_이름이_아니면_안_건드린다():
+    """대괄호는 자리 쪽지에도 쓴다 — 이름을 안 보면 멀쩡한 쪽지를 지운다."""
+    from genie_agents.tools import drop_bracket_calls
+
+    글 = "**[떠오를 것이 있다]** 3건이 걸렸는데"
+    assert drop_bracket_calls(글, {"memory_recall"}) == (글, [])
+    assert drop_bracket_calls("[자리] 방금 답에서", {"memory_recall"}) == ("[자리] 방금 답에서", [])
+
+
+def test_이름_목록이_비면_아무것도_안_한다():
+    from genie_agents.tools import drop_bracket_calls
+
+    글 = "[memory_recall] 검색"
+    assert drop_bracket_calls(글, set()) == (글, [])

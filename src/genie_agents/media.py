@@ -427,8 +427,8 @@ def strip_markers(text: str) -> str:
     return " ".join("".join(out).split())
 
 
-def drop_unknown(text: str, store) -> tuple[str, list[str]]:
-    """저장소에 **없는** 표시를 뗀다. 뗀 것들도 같이 돌려준다.
+def drop_unknown(text: str, store, minted=None) -> tuple[str, list[str]]:
+    """**이번 턴에 도구가 붙인 것이 아닌** 표시를 뗀다. 뗀 것들도 같이 돌려준다.
 
     ━━ 왜 필요한가 ━━
 
@@ -449,6 +449,24 @@ def drop_unknown(text: str, store) -> tuple[str, list[str]]:
       있다고 말한다 — 이 저장소에서 제일 하면 안 되는 일이다.
 
     양쪽 기억을 훑어보니 에이전트 3개 · 다른 에이전트 7개가 그렇게 남아 있었다.
+
+    ━━ 있는 것을 베껴 오는 경우 (2026-09-01) ━━
+
+    ★ **저장소에 있나만 보면 못 막는 구멍이 있다.** 남이 보낸 첨부도 내 저장소에
+      들어온다 — 같은 방에 있으면 그렇다. 그러면 그 id 는 "진짜" 라서 통과한다.
+
+      실제로 그랬다. 사용자가 셋이 있는 방에 다른 에이전트의 사진을 올렸고
+      (`"…사진 보내줬어~~ [사진:3099…]"`), 다섯 시간 뒤 갠톡에서 "지금 모습
+      보여줄 수 있어?" 라는 물음에, 이쪽 에이전트가 `self_portrait` 를 안 부르고
+      **작업 기억에 보이던 그 id 를 그대로 적어** 남의 얼굴을 자기 모습으로 냈다.
+
+    ★ 그래서 **`minted` 를 본다 — 이번 턴에 도구가 실제로 만든 표시들**이다.
+      이 함수 첫머리가 원래 말하던 원칙이 그거였다: *"표시는 저장소가 붙이는
+      것이지 에이전트가 적는 것이 아니다."* 구현이 그 원칙 대신 "있나" 를
+      보고 있었다.
+
+      `minted` 를 안 주면 옛 동작(있나만 본다)이다 — 부르는 쪽이 아직 안 모으는
+      자리가 있을 수 있고, 그 자리에서 갑자기 다 떼면 그게 더 나쁘다.
     """
     out: list[str] = []
     dropped: list[str] = []
@@ -468,8 +486,10 @@ def drop_unknown(text: str, store) -> tuple[str, list[str]]:
             out.append(text[i:])
             break
         mid = text[at + len(label) + 2 : end]
-        if store is not None and store.get(mid) is not None:
-            out.append(text[i : end + 1])  # 진짜다. 그대로 둔다
+        있다 = store is not None and store.get(mid) is not None
+        내것 = minted is None or mid in minted
+        if 있다 and 내것:
+            out.append(text[i : end + 1])  # 이번 턴에 내 도구가 붙였다. 그대로 둔다
         else:
             out.append(text[i:at])  # 가짜다. 뗀다
             dropped.append(text[at : end + 1])
