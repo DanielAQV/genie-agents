@@ -19,13 +19,20 @@ vLLM · Ollama 가 전부 그 모양을 낸다. 하나만 맞춰 두면 뒤를 �
 다만 무시하는 것은 어댑터 첫머리에 적는다 — 안 적으면 그 코드가 도는 줄 알고
 유지보수한다."*
 
-  tools            **넘겨도 안 쓴다.** 이 어댑터가 서는 자리는 추출이고,
-                   거기는 도구를 안 부르고 JSON 하나를 받는 자리다
-                   (`docs/wiring.md` 5절). 도구 루프를 로컬로 내리려면
-                   그때 여기에 tool_calls 를 붙여야 한다 — 지금은 없다
   cache_control    프롬프트 캐시가 없다. 붙여 보내도 그냥 지나간다
   서버 도구        없다
   cache 토큰 수    `Usage` 의 캐시 칸은 항상 0 이다
+
+━━ 도구 (2026-09-01 에 붙였다) ━━
+
+★ 예전엔 **넘겨도 안 썼다.** 추출 자리에만 서 있었고 거기는 도구를 안 부르고
+  JSON 하나를 받는 자리라서다. 유나의 일상 자리를 이리로 내리려니 필요해졌다 —
+  그 자리마저 답을 `unseen_note` / `unseen_pass` 로 낸다.
+
+OpenAI 쪽 `tools` / `tool_calls` 로 옮긴다. 옮기는 것이 넷이고, **되돌린
+것**(`tool_result` → `role:"tool"`)이 제일 조용히 고장나는 자리다 — 그걸
+글로 뭉개도 요청은 200 으로 돌아오고, 모델은 자기가 부른 도구가 무엇을 냈는지
+모른 채 답한다.
 
 ━━ 이 어댑터가 서는 자리 ━━
 
@@ -43,7 +50,7 @@ import urllib.parse
 import urllib.request
 
 from .. import env
-from .base import Response, TextBlock, Usage
+from .base import Response, TextBlock, ToolUseBlock, Usage
 
 DEFAULT_URL = "http://127.0.0.1:8080/v1/chat/completions"
 DEFAULT_MODEL = "로컬-모델"
@@ -94,6 +101,111 @@ def _text(content) -> str:
     return str(content or "")
 
 
+def _tools(tools) -> list[dict] | None:
+    """앤트로픽 모양의 도구 목록을 OpenAI 모양으로."""
+    if not tools:
+        return None
+    out = []
+    for t in tools:
+        # 서버 도구(`{"type": "web_search_..."}`)는 스키마가 없다. 로컬에는
+        # 그런 게 없으니 조용히 뺀다 — 보내면 서버가 400 을 낸다.
+        if not t.get("name") or not isinstance(t.get("input_schema"), dict):
+            continue
+        out.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": t["name"],
+                    "description": t.get("description") or "",
+                    "parameters": t["input_schema"],
+                },
+            }
+        )
+    return out or None
+
+
+def _blocks(content):
+    """앤트로픽 content 를 블록 목록으로. 글 하나면 한 칸짜리."""
+    if isinstance(content, list):
+        return content
+    return [{"type": "text", "text": _text(content)}]
+
+
+def _kind(b) -> str:
+    return b.get("type", "") if isinstance(b, dict) else getattr(b, "type", "")
+
+
+def _turns(messages) -> list[dict]:
+    """루프가 쌓아 온 것을 OpenAI 대화로 옮긴다.
+
+    ★ **도구 결과는 따로 선 한 턴이다**(`role: "tool"`). 예전처럼 글로 펴면
+      요청은 그대로 200 이고, 모델은 자기가 부른 도구가 무엇을 냈는지 모른 채
+      답한다 — 오류가 아니라 **조용한 헛소리**로 나온다.
+    """
+    chat: list[dict] = []
+    for m in messages:
+        role, blocks = m["role"], _blocks(m.get("content"))
+
+        결과 = [b for b in blocks if _kind(b) == "tool_result"]
+        if 결과:
+            # 도구 결과만 담긴 턴이다. 부른 것마다 한 턴씩 낸다.
+            for b in 결과:
+                chat.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": b.get("tool_use_id") or "",
+                        "content": _text(b.get("content")),
+                    }
+                )
+            남은 = [b for b in blocks if _kind(b) != "tool_result"]
+            if not 남은:
+                continue
+            blocks = 남은
+
+        부름 = [b for b in blocks if _kind(b) == "tool_use"]
+        글 = _text([b for b in blocks if _kind(b) == "text"])
+        turn: dict = {"role": role, "content": 글}
+        if 부름:
+            turn["tool_calls"] = [
+                {
+                    "id": getattr(b, "id", "") or (b.get("id") if isinstance(b, dict) else ""),
+                    "type": "function",
+                    "function": {
+                        "name": getattr(b, "name", "")
+                        or (b.get("name") if isinstance(b, dict) else ""),
+                        "arguments": json.dumps(
+                            getattr(b, "input", None)
+                            if not isinstance(b, dict)
+                            else b.get("input") or {},
+                            ensure_ascii=False,
+                        ),
+                    },
+                }
+                for b in 부름
+            ]
+        chat.append(turn)
+    return chat
+
+
+def _called(msg) -> list[ToolUseBlock]:
+    """답에 실려 온 도구 호출들."""
+    out = []
+    for i, c in enumerate(msg.get("tool_calls") or []):
+        fn = c.get("function") or {}
+        raw = fn.get("arguments")
+        try:
+            args = json.loads(raw) if isinstance(raw, str) and raw.strip() else (raw or {})
+        except ValueError:
+            # ★ **인자를 못 읽으면 빈 것으로 부른다.** 여기서 죽으면 그 판이
+            #   통째로 끝난다. 작은 모델은 인자를 어긋나게 낼 때가 있고,
+            #   그건 루프가 도구 쪽에서 받아 낼 수 있는 종류의 고장이다.
+            args = {}
+        if not isinstance(args, dict):
+            args = {}
+        out.append(ToolUseBlock(id=c.get("id") or f"call_{i}", name=fn.get("name") or "", input=args))
+    return out
+
+
 class _Messages:
     def __init__(self, endpoint: str) -> None:
         self.endpoint = endpoint
@@ -103,8 +215,7 @@ class _Messages:
         chat = []
         if system:
             chat.append({"role": "system", "content": _text(system)})
-        for m in messages:
-            chat.append({"role": m["role"], "content": _text(m.get("content"))})
+        chat += _turns(messages)
 
         body = {
             "model": model or DEFAULT_MODEL,
@@ -115,6 +226,9 @@ class _Messages:
             "temperature": float(extra.get("temperature", 0.2)),
             "stream": False,
         }
+        spec = _tools(tools)
+        if spec:
+            body["tools"] = spec
         req = urllib.request.Request(
             self.endpoint,
             data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
@@ -136,11 +250,22 @@ class _Messages:
             raise LocalUnavailable(f"로컬 모델이 빈 답을 냈다: {str(d)[:200]}")
         msg = choices[0].get("message") or {}
         u = d.get("usage") or {}
+        부름 = _called(msg)
+        블록: list = []
+        if msg.get("content"):
+            블록.append(TextBlock(text=msg["content"]))
+        블록 += 부름
+        if not 블록:
+            블록 = [TextBlock(text="")]
+        # OpenAI 는 "stop"/"length"/"tool_calls", 루프는 앤트로픽 말을 본다.
+        # ★ **부른 것이 있으면 그게 이유다.** `finish_reason` 을 "stop" 으로
+        #   내면서 tool_calls 를 같이 싣는 서버가 있다 — 실린 것을 믿는다.
+        끝 = choices[0].get("finish_reason")
         return Response(
-            content=[TextBlock(text=msg.get("content") or "")],
-            # OpenAI 는 "stop"/"length", 루프는 앤트로픽 말을 본다.
-            stop_reason="max_tokens" if choices[0].get("finish_reason") == "length"
-                        else "end_turn",
+            content=블록,
+            stop_reason=(
+                "tool_use" if 부름 else "max_tokens" if 끝 == "length" else "end_turn"
+            ),
             usage=Usage(
                 input_tokens=int(u.get("prompt_tokens") or 0),
                 output_tokens=int(u.get("completion_tokens") or 0),

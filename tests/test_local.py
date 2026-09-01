@@ -22,8 +22,9 @@ from genie_agents.adapters.base import Client, Response, TextBlock
 class Fake:
     """가짜 OpenAI 호환 서버. 보낸 몸통을 들고 있는다."""
 
-    def __init__(self, answer="네", finish="stop", usage=None, boom=None) -> None:
+    def __init__(self, answer="네", finish="stop", usage=None, boom=None, calls=None) -> None:
         self.answer, self.finish, self.boom = answer, finish, boom
+        self.calls = calls  # 답에 실어 보낼 tool_calls
         self.usage = usage or {"prompt_tokens": 12, "completion_tokens": 3}
         self.sent = None
 
@@ -40,9 +41,11 @@ class Fake:
                 return False
 
             def read(inner):
+                msg = {"content": self.answer}
+                if self.calls is not None:
+                    msg["tool_calls"] = self.calls
                 return json.dumps({
-                    "choices": [{"message": {"content": self.answer},
-                                 "finish_reason": self.finish}],
+                    "choices": [{"message": msg, "finish_reason": self.finish}],
                     "usage": self.usage,
                 }).encode("utf-8")
 
@@ -181,3 +184,111 @@ def test_기본은_로컬호스트다(맨몸):
 def test_적으면_거기로_간다(맨몸):
     맨몸.setenv("LOCAL_URL", "http://192.168.0.9:9999/v1/chat/completions")
     assert local.url().startswith("http://192.168.0.9")
+
+
+# ── 도구 (2026-09-01) ───────────────────────────────────────────────
+#
+# 예전엔 `tools` 를 넘겨도 안 썼다. 유나의 일상 자리를 이리로 내리려니
+# 필요해졌다 — 그 자리마저 답을 `unseen_note` / `unseen_pass` 로 낸다.
+
+WRITE = {
+    "name": "unseen_note",
+    "description": "든 생각을 남긴다",
+    "input_schema": {"type": "object", "properties": {"text": {"type": "string"}}},
+}
+
+
+def test_도구_목록을_옮겨_보낸다(monkeypatch):
+    f = Fake()
+    c = 클라(f, monkeypatch)
+    c.messages.create(model="m", max_tokens=8, tools=[WRITE],
+                      messages=[{"role": "user", "content": "x"}])
+
+    보낸 = f.sent["tools"][0]
+    assert 보낸["type"] == "function"
+    assert 보낸["function"]["name"] == "unseen_note"
+    assert 보낸["function"]["parameters"] == WRITE["input_schema"]
+
+
+def test_스키마_없는_서버도구는_안_보낸다(monkeypatch):
+    """`{"type": "web_search_..."}` 같은 것. 로컬엔 그런 게 없고, 보내면 400 이다."""
+    f = Fake()
+    c = 클라(f, monkeypatch)
+    c.messages.create(model="m", max_tokens=8,
+                      tools=[{"type": "web_search_20250305", "name": "web_search"}],
+                      messages=[{"role": "user", "content": "x"}])
+    assert "tools" not in f.sent
+
+
+def test_부른_것이_루프_모양으로_온다(monkeypatch):
+    from genie_agents.adapters.base import ToolUseBlock
+
+    f = Fake(answer="", calls=[
+        {"id": "call_1", "type": "function",
+         "function": {"name": "unseen_note", "arguments": '{"text": "비 온다"}'}},
+    ])
+    r = 클라(f, monkeypatch).messages.create(
+        model="m", max_tokens=8, tools=[WRITE], messages=[{"role": "user", "content": "x"}])
+
+    블록 = [b for b in r.content if isinstance(b, ToolUseBlock)]
+    assert len(블록) == 1
+    assert (블록[0].name,블록[0].input, 블록[0].id) == ("unseen_note", {"text": "비 온다"}, "call_1")
+    assert r.stop_reason == "tool_use"
+
+
+def test_부른_것이_있으면_그게_멈춘_이유다(monkeypatch):
+    """`finish_reason` 을 "stop" 으로 내면서 tool_calls 를 같이 싣는 서버가 있다.
+    실린 것을 믿는다 — 안 그러면 루프가 도구를 안 돌리고 끝낸다."""
+    f = Fake(finish="stop", calls=[
+        {"id": "c", "function": {"name": "unseen_pass", "arguments": "{}"}},
+    ])
+    r = 클라(f, monkeypatch).messages.create(
+        model="m", max_tokens=8, tools=[WRITE], messages=[{"role": "user", "content": "x"}])
+    assert r.stop_reason == "tool_use"
+
+
+def test_인자를_못_읽어도_안_죽는다(monkeypatch):
+    """작은 모델은 인자를 어긋나게 낼 때가 있다. 여기서 죽으면 그 판이 통째로
+    끝난다 — 빈 것으로 부르고, 판단은 도구 쪽에서 한다."""
+    f = Fake(calls=[{"id": "c", "function": {"name": "unseen_note", "arguments": "{망가"}}])
+    r = 클라(f, monkeypatch).messages.create(
+        model="m", max_tokens=8, tools=[WRITE], messages=[{"role": "user", "content": "x"}])
+    assert r.content[-1].input == {}
+
+
+def test_도구_결과는_따로_선_한_턴이다(monkeypatch):
+    """★ **여기가 제일 조용히 고장난다.** 결과를 글로 뭉개도 요청은 200 이고,
+    모델은 자기가 부른 도구가 무엇을 냈는지 모른 채 답한다."""
+    from genie_agents.adapters.base import ToolUseBlock
+
+    f = Fake()
+    클라(f, monkeypatch).messages.create(
+        model="m", max_tokens=8, tools=[WRITE],
+        messages=[
+            {"role": "user", "content": "오늘 뭐 봤어"},
+            {"role": "assistant", "content": [
+                TextBlock(text="음"),
+                ToolUseBlock(id="c1", name="unseen_note", input={"text": "비"}),
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "c1", "content": '{"ok": true}'},
+            ]},
+        ],
+    )
+
+    보낸 = f.sent["messages"]
+    assert [m["role"] for m in 보낸] == ["user", "assistant", "tool"]
+    assert 보낸[1]["content"] == "음"
+    assert 보낸[1]["tool_calls"][0]["function"]["name"] == "unseen_note"
+    assert json.loads(보낸[1]["tool_calls"][0]["function"]["arguments"]) == {"text": "비"}
+    assert 보낸[2]["tool_call_id"] == "c1"
+    assert 보낸[2]["content"] == '{"ok": true}'
+
+
+def test_도구를_안_주면_아무것도_안_바뀐다(monkeypatch):
+    """추출 자리는 예전 그대로다 — 도구 칸이 아예 안 실린다."""
+    f = Fake()
+    클라(f, monkeypatch).messages.create(
+        model="m", max_tokens=8, messages=[{"role": "user", "content": "x"}])
+    assert "tools" not in f.sent
+    assert f.sent["messages"] == [{"role": "user", "content": "x"}]
