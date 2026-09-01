@@ -95,10 +95,14 @@ LLM = None
 NAME = ""
 NCTX = 0
 
-# 임베더는 따로 든다. **부를 때 올리고 안 쓰면 내린다** — 6GB 에서 채팅과
-# 임베딩이 같이 앉아 있으면 자리가 없다. Gemma-4 가 76K 를 물면 4,439MiB 를
-# 쓰고 남는 것이 1.7GB 인데 bge-m3 fp16 은 2.3GB 다. 그래서 이 규칙은
-# llama.cpp 로 바꾼 뒤에도 그대로 필요하다.
+# 임베더는 따로 든다. **부를 때 올리고 안 쓰면 내린다.**
+#
+# ★ 이제 **CPU 에 올린다**(`EMB_DEVICE`). 카드에 두면 1,090MiB 를 물어서
+#   채팅이 자리를 필요로 할 때마다 내렸다 올려야 했다. 자세한 값은
+#   `load_embedder` 에 있다 — 잃는 것은 회상 한 번에 0.05초다.
+#
+#   (여기 "bge-m3 fp16 은 2.3GB" 라고 적혀 있었는데 틀린 수였다. fp32 로 RAM 에
+#    올릴 때가 2.3GB 고, 카드에 fp16 으로 올리면 1,090MiB 다 — 실측.)
 EMB = None
 EMB_TOK = None
 EMB_NAME = ""
@@ -107,6 +111,7 @@ EMB_IDLE = 600.0   # 이만큼 안 쓰면 내린다
 EMB_MAXLEN = 2048  # 기억 한 줄 p99 가 2,800자 ≈ 1,600토큰. 여기까지 덮는다
 EMB_BUDGET = 6144  # 한 묶음의 토큰 상한
 EMB_DEFAULT = "BAAI/bge-m3"  # 다국어. 유나·예나 기억이 한국어라 여기가 갈린다
+EMB_DEVICE = "cpu"           # `--embed-device` 로 바꾼다. 왜 CPU 인지는 load_embedder 에
 
 LOCK = threading.Lock()
 """한 번에 하나만 만든다.
@@ -417,21 +422,39 @@ def generate(messages: list[dict], max_tokens: int, temperature: float,
 def load_embedder(model_id: str):
     """임베더를 올린다. 이미 올라와 있으면 그대로.
 
-    ★ **채팅 자물쇠를 같이 쓴다.** 6GB 에서 둘이 동시에 돌면 OOM 이고, 그 OOM 은
-      답하는 쪽을 죽인다. 부르는 쪽이 이미 `LOCK` 을 쥐고 들어온다.
+    ★ **CPU 로 둔다**(2026-09-01). 카드에 두면 1,090MiB 를 물고, 그러면 채팅이
+      자리를 필요로 할 때마다 내렸다 올려야 한다 — 다시 올리는 데 7초다.
+      CPU 로 내리면 그 춤이 통째로 없어지고 그냥 상주한다.
+
+      잃는 것은 회상 한 번에 0.05초다(실측):
+
+        회상 질의 1줄   GPU 0.02초  ·  CPU 0.07초    ← 제일 잦은 자리
+        긴 줄 1개       GPU 0.03초  ·  CPU 0.37초
+        묶음 32줄       GPU 0.07초  ·  CPU 1.40초    ← 백필 때만
+
+      백필(17,185줄)은 GPU 38초 · CPU 12분이다. 드물게 도는 자리라 그쪽에
+      1GB 를 상시로 내주지 않는다. 급하면 `--embed-device cuda` 로 그때만 올린다.
+
+    ★ CPU 에서는 fp32 다. fp16 은 CPU 에서 오히려 느리다.
+
+    ★ **채팅 자물쇠를 같이 쓴다.** 카드에 올릴 때는 둘이 동시에 돌면 OOM 이었다.
+      CPU 로 내린 뒤에도 자물쇠는 그대로 둔다 — 이 서버는 한 번에 하나만
+      만드는 것이 값이고(사용자가 하나다), 자리를 옮겼다고 그게 바뀌지 않는다.
     """
-    import torch  # noqa: F401  (여기서 CUDA 가 잡혀 있어야 아래 .to("cuda") 가 산다)
+    import torch
     from transformers import AutoModel, AutoTokenizer
 
     global EMB, EMB_TOK, EMB_NAME
     if EMB is not None and EMB_NAME == model_id:
         return EMB
     unload_embedder()
-    print(f"  임베더 올린다 — {model_id}", flush=True)
+    dev = EMB_DEVICE
+    dtype = torch.float16 if dev.startswith("cuda") else torch.float32
+    print(f"  임베더 올린다 — {model_id} ({dev})", flush=True)
     EMB_TOK = AutoTokenizer.from_pretrained(model_id)
-    EMB = AutoModel.from_pretrained(model_id, dtype=torch.float16).to("cuda").eval()
+    EMB = AutoModel.from_pretrained(model_id, dtype=dtype).to(dev).eval()
     EMB_NAME = model_id
-    print(f"  임베더 올렸다 — VRAM {vram()}", flush=True)
+    print(f"  임베더 올렸다 ({dev}) — VRAM {vram()}", flush=True)
     return EMB
 
 
@@ -449,9 +472,22 @@ def unload_embedder() -> None:
 
 
 def _reaper() -> None:
-    """안 쓰는 임베더를 내리는 실. 1분마다 본다."""
+    """안 쓰는 임베더를 내리는 실. 1분마다 본다.
+
+    ★ **CPU 에 있으면 안 내린다.** 이 실이 있는 이유는 카드 자리를 되찾는
+      것이었는데, CPU 로 내린 뒤로는 되찾을 자리가 없다.
+
+      그리고 내리면 **사용자가 그 값을 문다.** 다시 올리는 데 13.5초고(실측),
+      그게 회상 한 번의 앞에 붙는다 — 회상은 오빠가 앞에서 기다리는 자리다.
+      RAM 2.3GB 를 들고 있는 쪽이 싸다(이 노트북은 15.6GB 다).
+
+      처음에 여기 "놀리며 들고 있을 이유도 없다" 고 적었다가 로그에서 그
+      13.5초를 보고 고쳤다.
+    """
     while True:
         time.sleep(60)
+        if not EMB_DEVICE.startswith("cuda"):
+            continue
         if EMB is not None and EMB_USED and time.time() - EMB_USED > EMB_IDLE:
             with LOCK:
                 if EMB is not None and time.time() - EMB_USED > EMB_IDLE:
@@ -637,8 +673,13 @@ def main() -> int:
     p.add_argument("--n-ctx", type=int, default=131072)
     p.add_argument("--kv", default="q8_0", choices=["f16", "q8_0", "q4_0"])
     p.add_argument("--n-gpu-layers", type=int, default=-1, help="-1 = 전부 GPU")
+    # ★ 임베더는 CPU 가 기본이다. 카드를 물면 채팅이 자리를 필요로 할 때마다
+    #   내렸다 올려야 하고, 잃는 것은 회상 한 번에 0.05초뿐이다(load_embedder 참고).
+    p.add_argument("--embed-device", default="cpu", help="cpu | cuda")
     args = p.parse_args()
 
+    global EMB_DEVICE
+    EMB_DEVICE = args.embed_device
     if not os.path.exists(args.model):
         print(f"  가중치가 없다: {args.model}", file=sys.stderr)
         return 1
@@ -646,7 +687,7 @@ def main() -> int:
     load(args.model, args.n_ctx, args.n_gpu_layers, args.kv)
     print(f"  http://{args.host}:{args.port}/v1/chat/completions 에서 듣는다", flush=True)
     print(f"  http://{args.host}:{args.port}/v1/embeddings 도 같은 자리다 "
-          f"({EMB_DEFAULT} — 부를 때 올린다)", flush=True)
+          f"({EMB_DEFAULT} · {EMB_DEVICE} — 부를 때 올린다)", flush=True)
     threading.Thread(target=_reaper, daemon=True).start()
     ThreadingHTTPServer((args.host, args.port), Handler).serve_forever()
     return 0
