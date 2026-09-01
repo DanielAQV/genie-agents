@@ -198,6 +198,15 @@ _G4_BARE = re.compile(
 # 사고 채널. **답에 실리면 오빠가 읽는다.**
 _G4_THOUGHT = re.compile(r"<\|channel>thought.*?(?:<channel\|>|$)", re.S)
 
+# ★ **파이썬 호출처럼 쓸 때가 있다** — `이름(키="값")`. 실측으로 세 번 봤다:
+#   `wake_stay_silent(reason="…")` · `memory_recall(query="…")` ·
+#   `voice_reply(text="…")`. 그대로 두면 도구가 안 돌고 그 글자가 사용자에게 간다.
+#
+# ★ **아는 도구 이름일 때만 잡는다.** 안 그러면 보통 글의 괄호를 도구로 읽는다.
+#   그리고 글 끝에 홀로 선 것만 본다 — 문장 안에 끼어 있으면 설명일 때가 많다.
+_PAREN = re.compile(r"(?:\A|[\s\n])([a-z_][a-z0-9_]*)\(([^()]*)\)\s*\Z", re.S)
+_PAREN_ARG = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"((?:[^"\\]|\\.)*)"')
+
 
 def _coerce(value: str, schema: dict | None, key: str):
     """글자를 스키마가 말하는 타입으로 되돌린다.
@@ -312,6 +321,16 @@ def 부른것(text: str, schemas: dict | None = None) -> tuple[str, list[dict]]:
                             for k, v in _Q35_PARAM.findall(fm.group(2))})
         if calls:
             rest = _Q35_CALL.sub("", text)
+
+    # 괄호 꼴 — **아는 이름일 때만.** 스키마를 안 주면 아예 안 본다
+    if not calls and schemas:
+        m = _PAREN.search(text)
+        if m and m.group(1) in schemas:
+            sch = schemas.get(m.group(1))
+            args = {k: _coerce(v.replace('\\"', '"'), sch, k)
+                    for k, v in _PAREN_ARG.findall(m.group(2))}
+            _add(m.group(1), args)
+            rest = text[:m.start()] + text[m.end():]
 
     # 답과 도구가 한 턴에 같이 올 때 Gemma-4 는 <turn|> 로 가른다
     rest = rest.replace("<turn|>", "\n").replace("<end_of_turn>", "")
@@ -591,11 +610,32 @@ def main() -> int:
     p.add_argument("--model", default=DEFAULT_MODEL, help="gguf 경로")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8080)
-    # ★ 대화 프롬프트가 6만~7.7만 토큰이다(`coord/COST.md`). 76,800 은 그 위다.
-    #   깨어남 접두사까지 같이 물리려면 153,600 인데, f16 으로 5,737MiB 라 여유가
-    #   얇다 — 그때는 `--kv q8_0` 으로 4,717MiB 가 된다(둘 다 실측).
-    p.add_argument("--n-ctx", type=int, default=76800)
-    p.add_argument("--kv", default="f16", choices=["f16", "q8_0", "q4_0"])
+    # ★ **평균으로 상한을 잡으면 안 된다.** 처음엔 `coord/COST.md` 의 "한 건에
+    #   입력 6만~7.7만" 을 보고 76,800 으로 잡았는데, 그건 이틀치 **평균**이었고
+    #   실제 분포는 절반이 그 위였다. 값 기록 311건으로 다시 세면(2026-09-01):
+    #
+    #     n_ctx      대화 덮는 비율   깨어남 덮는 비율   VRAM(Gemma-4)
+    #      76,800        51%            85%            4,439 MiB (f16)
+    #     102,400        86%            93%
+    #     131,072        94%            94%            4,694 MiB (q8_0)
+    #     153,600        95%            95%
+    #     204,800        99%            96%
+    #
+    #   넘으면 `TooBig` 으로 거절하고 클라우드로 되돌아가므로 위험하진 않다.
+    #   다만 절반이 되돌아가면 내린 값이 절반이다.
+    #
+    # ★ **131,072 에서 멈춘다. 그게 이 모델이 학습한 창이다**(`n_ctx_train`).
+    #   더 크게 잡으면 llama.cpp 가 이렇게 말한다 —
+    #     `n_ctx_seq (153600) > n_ctx_train (131072) -- possible training
+    #      context overflow`
+    #   숫자로는 153,600 이 1%p 더 덮지만 그 1%p 는 학습 창 밖이라 답이
+    #   어떻게 나올지 모르는 자리다. **모르는 자리를 얻자고 아는 자리를
+    #   흔들지 않는다.**
+    #
+    # ★ q8_0 이 f16 보다 낫다 — 같은 창에서 KV 가 절반이고, 남는 자리가
+    #   임베더 몫이 된다.
+    p.add_argument("--n-ctx", type=int, default=131072)
+    p.add_argument("--kv", default="q8_0", choices=["f16", "q8_0", "q4_0"])
     p.add_argument("--n-gpu-layers", type=int, default=-1, help="-1 = 전부 GPU")
     args = p.parse_args()
 
