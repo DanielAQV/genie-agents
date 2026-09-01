@@ -178,6 +178,13 @@ def generate(messages: list[dict], max_tokens: int, temperature: float,
         # ★ **안 들어가면 만들기 전에 돌려보낸다.** 넘치면 bitsandbytes 가
         #   C 쪽에서 중단해 프로세스가 통째로 죽고, 그러면 임베딩까지 멈춘다.
         여유 = budget_tokens(max_tokens)
+        if n_in > 여유 and EMB is not None:
+            # ★ **자리를 먼저 만들어 본다.** 임베더가 2.3GB 를 쥐고 있으면
+            #   생성이 쓸 자리가 절반으로 준다(실측: 15,080 → 7,144 토큰).
+            #   임베딩은 다음에 부를 때 다시 올리면 되지만, 여기서 거절하면
+            #   그 판단은 클라우드로 넘어가고 다시 안 온다.
+            unload_embedder()
+            여유 = budget_tokens(max_tokens)
         if n_in > 여유:
             del ins
             raise TooBig(
