@@ -81,3 +81,96 @@ class JsonStore:
         except BaseException:
             Path(tmp).unlink(missing_ok=True)
             raise
+
+
+class JsonlStore:
+    """한 줄에 하나. **읽을 때 통째로 안 만들고, 쓸 때 통째로 안 쓴다.**
+
+    `JsonStore` 를 안 없앤다 — 작은 상태 파일(잔고·알림·인박스)은 통째로 읽고
+    쓰는 편이 단순하고, 거기서는 그 값이 안 든다. 이건 **줄이 만 단위로 쌓이는
+    파일**을 위한 것이다.
+
+    ━━ 왜 필요했나 (2026-09-01 실측) ━━
+
+    유나의 `episodes.json` 이 18.7MB · 17,185줄이다. 그걸 `json.load` 로 읽으면
+    파이썬 객체 그래프가 한 번에 만들어져 **피크가 151MB** 다. 상주는 60MB 로
+    내려가지만 피크는 안 돌아온다 — 2GB 서버에 프로세스가 여섯이면 그 차이가
+    올릴 수 있냐 없냐를 가른다.
+
+        읽기   json.load 151MB 피크  →  줄 단위 56MB       (시간은 대등)
+        쓰기   말 한 마디마다 19MB 재작성  →  한 줄 덧붙이기
+
+    ★ 같은 처방을 이 저장소가 한 번 했다 — 벡터를 `episodes.json` 에서 뺐을 때
+      "파싱 피크가 454MB … 분리하니 73MB"(`recall.RecallStore` 주석). 이건 그
+      다음 칸이다.
+
+    ★ **읽을 때 관대하다.** 깨진 줄은 건너뛴다. 덧붙이는 도중에 죽으면 마지막
+      줄이 반만 남을 수 있는데, 그 한 줄 때문에 기억 전체를 못 읽으면 안 된다.
+      `from_dict` 가 모르는 키를 버리는 것과 같은 이유다.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
+
+    def exists(self) -> bool:
+        return self.path.exists()
+
+    def stream(self):
+        """한 줄씩 내놓는다. **리스트를 안 만든다** — 부르는 쪽이 정한다."""
+        if not self.path.exists():
+            return
+        with self.path.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    yield json.loads(line)
+                except ValueError:
+                    continue  # 깨진 줄 하나가 나머지를 막지 않는다
+
+    def append(self, obj: Any) -> None:
+        """한 줄 덧붙인다.
+
+        ★ **한 번의 `write` 로 낸다.** 줄 하나가 몇백 바이트라 append 모드에서는
+          쪼개지지 않는다. 나눠 쓰면 다른 프로세스가 읽는 중에 반쪽 줄을 본다.
+        """
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+
+    def rewrite(self, rows) -> None:
+        """전부 다시 쓴다(원자적). 고치거나 지울 때만 부른다 — 덧붙이는 자리가 아니다."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(self.path.parent), suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                for r in rows:
+                    f.write(json.dumps(r, ensure_ascii=False) + "\n")
+            _replace_with_retry(tmp, self.path)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
+
+    def tail(self, n: int) -> list:
+        """꼬리 n 줄. **앞을 안 읽는다.**
+
+        작업 기억은 최근 것만 본다. 17,185줄 중 200줄을 보려고 전부 파싱하면
+        0.37초에 피크 151MB 인데, 꼬리만 읽으면 0.12초에 14MB 다(실측).
+        """
+        if not self.path.exists() or n <= 0:
+            return []
+        from collections import deque
+
+        with self.path.open(encoding="utf-8") as f:
+            lines = deque(f, maxlen=n)
+        out = []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except ValueError:
+                continue
+        return out
