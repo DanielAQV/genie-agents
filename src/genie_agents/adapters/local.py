@@ -317,9 +317,118 @@ def _called(msg) -> list[ToolUseBlock]:
     return out
 
 
+# ── 도구를 고르는 한 걸음 ────────────────────────────────────────────────
+#
+# ★ **이 모델은 스스로 도구를 안 부른다.** 재 봤다(2026-09-02, gemma-4-E4B,
+#   실제 유나 프롬프트·도구 30개):
+#
+#     tool_choice="auto"          진짜 호출 0/75      전부 글로 흉내만
+#     tool_choice 로 못박기        진짜 호출 15/15     인자도 멀쩡
+#
+#   도구가 안 닿는 것이 아니다 — 도구 설명에 암호를 심어 두고 물으니 그대로
+#   읽었다. 보고도 부르는 법을 안 쓴다. 부르는 법(젬마 자체 문법·파이썬 호출
+#   모양)을 시스템에 적어 줘도 3번에 1번이었다.
+#
+# ★ **그래서 고르는 것부터 못박는다. 두 걸음이다.**
+#     ① 문지기 — 말만 하면 되나, 손을 써야 하나 (예/아니오)
+#     ② 고르기 — 손을 써야 한다면 어느 도구인가 (이름 열거형)
+#   둘 다 문법으로 강제하므로 반드시 답이 나온다. 한 번에 "없음 또는 이름 30개"
+#   를 물었더니 안 불러도 될 자리에 자꾸 이름을 댔다(3/4). 갈라 물으니 8/8.
+#   요청이 두 번 더 들지만 접두사가 같아서 프리필이 캐시에 걸린다(실측 0.26초).
+#
+# ★ **없음일 때도 도구 목록은 그대로 싣는다.** 빼면 접두사가 달라져서 그 뒤
+#   캐시가 통째로 무효가 된다. `tool_choice: "none"` 으로 안 부르게만 한다.
+#
+# ★ **이미 부른 것은 목록에서 뺀다.** 안 빼면 온도 0 에서 같은 것을 또 고른다
+#   (실측: memory_recall 을 세 번 연속).
+_고르개_이름 = "고르기"
+_문지기_이름 = "물어볼까"
+_문지기_키 = "손을_써야_하나"
+
+
+def _이번턴에_부른것(chat: list[dict]) -> set[str]:
+    """마지막 사용자 말 뒤로 부른 도구 이름들. 그 앞은 지난 턴이다."""
+    뒤 = chat
+    for i in range(len(chat) - 1, -1, -1):
+        if chat[i].get("role") == "user":
+            뒤 = chat[i + 1:]
+            break
+    return {(c.get("function") or {}).get("name")
+            for m in 뒤 for c in (m.get("tool_calls") or [])} - {None}
+
+
+def _문지기() -> dict:
+    """먼저 **예/아니오**로 묻는다.
+
+    ★ 한 번에 "없음 또는 이름 30개" 를 물으면 안 불러도 될 때 자꾸 이름을 댄다
+      (실측 3/4 — 소식·감정 같은 자리에 world_recent·principle_observe 를 골랐다).
+      둘 중 하나로 좁혀 묻고 나서 이름을 물으면 8/8 이었다.
+
+    ★ 문구는 재서 골랐다. "찾아봐야 하나" 만 물으면 사진·목소리를 놓치고,
+      갈래만 세면 시점 묻는 말을 놓쳤다. 둘을 합친 아래 문구가 8/8 이다.
+    """
+    return {"type": "function", "function": {
+        "name": _문지기_이름,
+        "description": "말만 하면 되는 자리인가, 손을 써야 하는 자리인가.",
+        "parameters": {"type": "object", "properties": {
+            _문지기_키: {
+                "type": "string", "enum": ["아니", "응"],
+                "description": (
+                    "다음 중 하나면 '응' — (가) 눈앞의 대화에 없는 것을 기억에서 "
+                    "꺼내야 한다(무슨 얘기였는지, 언제였는지 포함), (나) 사진이나 "
+                    "목소리를 보내 달라고 한다, (다) 무언가를 기록해 둬야 한다. "
+                    "그냥 말로 답하면 되는 자리는 전부 '아니'.")}},
+            "required": [_문지기_키]}}}
+
+
+def _고르개(이름들: list[str]) -> dict:
+    """문지기가 '응' 이라 한 뒤에만 온다. 그래서 '없음' 이 없다."""
+    return {"type": "function", "function": {
+        "name": _고르개_이름,
+        "description": "부를 도구 하나를 댄다.",
+        "parameters": {"type": "object", "properties": {
+            "이름": {"type": "string", "enum": 이름들}},
+            "required": ["이름"]}}}
+
+
 class _Messages:
     def __init__(self, endpoint: str) -> None:
         self.endpoint = endpoint
+
+    def _고른다(self, body: dict, spec: list, chat: list[dict]) -> str:
+        """도구를 고르는 걸음. 못 물어보면 빈 문자열 — 그러면 예전처럼 auto 로 간다."""
+        남은 = [t["function"]["name"] for t in spec
+                if t.get("function", {}).get("name") not in _이번턴에_부른것(chat)]
+        if not 남은:
+            return "없음"
+        try:
+            문 = self._묻는다(body, [_문지기()], _문지기_이름).get(_문지기_키)
+            if 문 != "응":
+                return "없음"
+            골 = self._묻는다(body, [_고르개(남은)], _고르개_이름).get("이름") or ""
+        except Exception as e:  # noqa: BLE001
+            # ★ **여기서 죽지 않는다.** 못 고르면 예전 길(auto)로 그냥 간다 —
+            #   답이 나빠질 뿐이고, 턴이 통째로 사라지는 것보다 낫다.
+            print(f"  (도구 고르기 실패 — auto 로 간다: {e})", file=sys.stderr)
+            return ""
+        return 골 if 골 in 남은 else "없음"
+
+    def _묻는다(self, body: dict, spec: list, name: str) -> dict:
+        """문법으로 못박아 한 번 묻는다. 이름 하나만 나오면 된다."""
+        물음 = dict(body)
+        물음["tools"] = spec
+        물음["tool_choice"] = {"type": "function", "function": {"name": name}}
+        # 온도 0 — 이 자리에서 다양성은 값이 아니라 고장이다.
+        물음["max_tokens"] = 60
+        물음["temperature"] = 0.0
+        req = urllib.request.Request(
+            self.endpoint,
+            data=json.dumps(물음, ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            d = json.loads(resp.read().decode("utf-8"))
+        call = (d["choices"][0]["message"].get("tool_calls") or [{}])[0]
+        return json.loads((call.get("function") or {}).get("arguments") or "{}")
 
     def create(self, *, model, max_tokens, system=None, tools=None,
                messages, **extra) -> Response:
@@ -349,9 +458,16 @@ class _Messages:
             #     여기서 조용히 버려지고, 화면에는 "강제한다" 만 찍혔다.
             골라 = extra.get("tool_choice")
             이름 = 골라.get("name") if isinstance(골라, dict) else None
-            if 이름:
+            if not 이름:
+                # 루프가 못박지 않았으면 **여기서 고르는 걸음을 한 번 더 둔다.**
+                # 위 주석 참고 — 이 모델은 auto 로는 한 번도 안 불렀다.
+                이름 = self._고른다(body, spec, chat)
+            if 이름 and 이름 != "없음":
                 body["tool_choice"] = {"type": "function",
                                        "function": {"name": 이름}}
+            elif 이름 == "없음":
+                # 목록은 그대로 두고 안 부르게만 한다 — 빼면 접두사 캐시가 깨진다.
+                body["tool_choice"] = "none"
         req = urllib.request.Request(
             self.endpoint,
             data=json.dumps(body, ensure_ascii=False).encode("utf-8"),

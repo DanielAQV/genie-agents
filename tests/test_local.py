@@ -229,14 +229,46 @@ def test_못박은_도구를_실어_보낸다(monkeypatch):
         "type": "function", "function": {"name": "unseen_note"}}
 
 
-def test_auto_는_안_싣는다(monkeypatch):
-    """서버 기본이 이미 `auto` 다. 이름이 없으면 못박을 것도 없다."""
+def test_auto_면_문지기에게_먼저_묻는다(monkeypatch):
+    """예전엔 auto 를 그냥 흘려보냈다. 그런데 이 모델은 auto 로 한 번도 안 불렀다
+    (실측 0/75). 그래서 못박지 않은 자리에서는 문지기에게 먼저 묻는다."""
     f = Fake()
     c = 클라(f, monkeypatch)
     c.messages.create(model="m", max_tokens=8, tools=[WRITE],
                       tool_choice={"type": "auto"},
                       messages=[{"role": "user", "content": "x"}])
-    assert "tool_choice" not in f.sent
+    # 가짜 서버는 tool_calls 를 안 준다 = 문지기가 답을 못 냈다 → 안 부른다.
+    # 목록은 그대로 두고 `none` 으로만 막는다 — 빼면 접두사 캐시가 깨진다.
+    assert f.sent["tool_choice"] == "none"
+    assert f.sent["tools"], "도구 목록은 그대로 실려 있어야 한다"
+
+
+def test_문지기가_응하면_고른_도구를_못박는다(monkeypatch):
+    def 부름(name, args):
+        return [{"id": "c", "type": "function",
+                 "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)}}]
+
+    보낸것 = []
+
+    class 차례(Fake):
+        """문지기 → 고르기 → 진짜. 세 번 오는 것을 차례로 답한다."""
+
+        답들 = [부름("물어볼까", {"손을_써야_하나": "응"}),
+                부름("고르기", {"이름": "unseen_note"}),
+                None]
+
+        def __call__(inner, req, timeout=None):
+            inner.calls = inner.답들[min(len(보낸것), len(inner.답들) - 1)]
+            r = Fake.__call__(inner, req, timeout)
+            보낸것.append(inner.sent)
+            return r
+
+    c = 클라(차례(), monkeypatch)
+    c.messages.create(model="m", max_tokens=8, tools=[WRITE],
+                      tool_choice={"type": "auto"},
+                      messages=[{"role": "user", "content": "x"}])
+    assert len(보낸것) == 3
+    assert 보낸것[-1]["tool_choice"] == {"type": "function", "function": {"name": "unseen_note"}}
 
 
 def test_도구가_없으면_못박지도_않는다(monkeypatch):
