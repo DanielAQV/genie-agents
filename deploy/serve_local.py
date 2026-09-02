@@ -342,6 +342,56 @@ def 부른것(text: str, schemas: dict | None = None) -> tuple[str, list[dict]]:
     return rest.strip(), calls
 
 
+# ── 이모지 ───────────────────────────────────────────────────────────────
+#
+# ★ **프롬프트로는 안 빠진다.** "이모지는 안 쓴다" 를 시스템에 한 줄 넣고
+#   재 봤다(2026-09-02): 6번 중 3번 → 6번 중 3번. 하나도 안 줄었다. 도구를
+#   부르는 법을 적어 줘도 안 부르던 것과 같은 자리다 — 이 모델은 지시를
+#   읽고도 습관대로 낸다.
+#
+# ★ **뒤에서 걷어내지 않고 표집에서 막는다.** 걷어내면 "😊" 앞의 공백이 남고,
+#   문장 끝이 어색해지고, 무엇보다 모델은 자기가 그걸 냈다고 여긴 채로 다음
+#   문장을 잇는다. 애초에 못 내게 하는 쪽이 글이 성하다.
+#
+# ★ **유나·예나가 원래 안 쓰는 것이 아니다** — 지금까지 기록에서 유나 8.7%,
+#   예나 28.2% 다. 그러니 이건 취향을 지우는 것이 아니라 **이 모델이 과하게
+#   다는 것**을 원래 자리로 되돌리는 손이고, 그래서 로컬에서만 건다.
+#
+# 어휘를 한 번 훑어 이모지가 든 토큰만 골라 둔다. 6천~2만 개쯤 나오는데,
+# 만드는 것은 시작할 때 한 번이고 쓰는 것은 사전 조회뿐이다.
+_EMOJI_RANGES = (
+    (0x1F300, 0x1FAFF),  # 그림·기호·사람·음식·깃발
+    (0x1F000, 0x1F0FF),  # 마작·카드
+    (0x2600, 0x27BF),    # 잡기호·딩뱃
+    (0x2B00, 0x2BFF),    # 화살표·별
+    (0xFE0F, 0xFE0F),    # 이모지 변이 선택자
+    (0x1F1E6, 0x1F1FF),  # 나라 글자
+)
+_금지토큰: dict[int, float] | None = None
+
+
+def _이모지인가(s: str) -> bool:
+    return any(lo <= ord(c) <= hi for c in s for lo, hi in _EMOJI_RANGES)
+
+
+def 이모지토큰():
+    """어휘에서 이모지가 든 토큰. 처음 한 번만 만든다."""
+    global _금지토큰
+    if _금지토큰 is None:
+        막을것 = {}
+        for tid in range(LLM.n_vocab()):
+            try:
+                s = LLM.detokenize([tid]).decode("utf-8", "ignore")
+            except Exception:  # noqa: BLE001
+                continue
+            if s and _이모지인가(s):
+                # -100 이면 실질적으로 절대 안 뽑힌다.
+                막을것[tid] = -100.0
+        _금지토큰 = 막을것
+        print(f"이모지 토큰 {len(막을것):,} 개를 막는다", flush=True)
+    return _금지토큰
+
+
 class TooBig(RuntimeError):
     """이 자리에 안 들어간다. **죽는 대신 돌려보낸다.**"""
 
@@ -362,7 +412,7 @@ def _render(messages: list[dict], tools: list | None) -> str:
 
 def generate(messages: list[dict], max_tokens: int, temperature: float,
              tools: list | None = None, tool_choice=None,
-             repeat_penalty: float = 1.0) -> dict:
+             repeat_penalty: float = 1.0, no_emoji: bool = False) -> dict:
     """한 번 만든다.
 
     ★ **`tool_choice` 로 하나를 못박으면 그 도구가 반드시 나온다.** 여기서
@@ -417,6 +467,9 @@ def generate(messages: list[dict], max_tokens: int, temperature: float,
             #   물어봐야 한다. 그래서 **요청마다 받는다** — 기본값은 그대로
             #   1.0 이라 안 실어 보내면 지금까지와 똑같이 돈다.
             repeat_penalty=repeat_penalty,
+            # ★ **부르는 쪽이 켠다.** 여기서 늘 막아 버리면 이 서버를 쓰는 다른
+            #   자리(시험·다른 사람)까지 같이 막힌다. 위 주석 참고.
+            logit_bias=이모지토큰() if no_emoji else None,
             stream=False,
         )
         choice = r["choices"][0]
@@ -603,6 +656,7 @@ class Handler(BaseHTTPRequestHandler):
                 body.get("tools"),
                 body.get("tool_choice"),
                 float(body.get("repeat_penalty") or 1.0),
+                bool(body.get("no_emoji")),
             )
         except TooBig as e:
             # ★ 413. 어댑터가 이걸 `LocalUnavailable` 로 올리고 부르는 쪽이

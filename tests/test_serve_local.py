@@ -41,13 +41,14 @@ def 붙은것(monkeypatch):
     본것 = {}
 
     def 가짜(messages, max_tokens, temperature, tools=None, tool_choice=None,
-            repeat_penalty=1.0):
+            repeat_penalty=1.0, no_emoji=False):
         본것["messages"] = messages
         본것["max_tokens"] = max_tokens
         본것["temperature"] = temperature
         본것["tools"] = tools
         본것["tool_choice"] = tool_choice
         본것["repeat_penalty"] = repeat_penalty
+        본것["no_emoji"] = no_emoji
         return {"text": '{"opens": [], "moves": [], "unresolved": []}',
                 "in": 123, "out": 45, "finish": "stop"}
 

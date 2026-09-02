@@ -1,0 +1,4 @@
+  gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf — 올리는 중
+  올렸다 — gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf · ctx 131,072 · KV q8_0 · VRAM 4399/6144 MiB
+  http://0.0.0.0:8080/v1/chat/completions 에서 듣는다
+  http://0.0.0.0:8080/v1/embeddings 도 같은 자리다 (BAAI/bge-m3 · cpu — 부를 때 올린다)
