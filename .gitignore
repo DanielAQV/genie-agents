@@ -9,3 +9,5 @@ venv/
 .*/
 !.gitignore
 !.github/
+llm.log
+llm.err
