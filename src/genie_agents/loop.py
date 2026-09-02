@@ -69,6 +69,15 @@ class Turn:
     cache_write_tokens: int = 0
     output_tokens: int = 0
     requests: int = 0
+    peak_tokens: int = 0
+    """한 번에 실린 것 중 제일 큰 것.
+
+    ★ **`input_tokens` 로는 창을 넘는지 못 잰다.** 그건 한 턴 동안 오간 요청을
+      다 더한 값이라, 바퀴를 여덟 번 돌면 여덟 배로 나온다 — 363,799 짜리 턴이
+      실제로는 한 번에 6만쯤이었다. 창(로컬 131,072)을 넘기는 것은 **한 번의
+      크기**이고, 그 수는 아무 데도 안 찍히고 있었다.
+
+    한 요청의 입력 전부다 — 새로 읽은 것 + 캐시에서 읽은 것 + 캐시에 쓴 것."""
     seconds: float = 0.0
     dropped: list[str] = field(default_factory=list)
     extra: dict = field(default_factory=dict)
@@ -116,6 +125,11 @@ def _count(turn: Turn, response: Any, meter=None) -> None:
     turn.cached_tokens += getattr(usage, "cache_read_input_tokens", 0) or 0
     turn.cache_write_tokens += getattr(usage, "cache_creation_input_tokens", 0) or 0
     turn.output_tokens += getattr(usage, "output_tokens", 0) or 0
+    # 더하지 않고 **제일 큰 것**을 남긴다 — 창을 넘는지는 합계가 아니라 한 번이 정한다.
+    turn.peak_tokens = max(turn.peak_tokens, sum(
+        getattr(usage, k, 0) or 0
+        for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+    ))
     if meter is not None:
         meter(turn, response)
 

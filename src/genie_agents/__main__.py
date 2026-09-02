@@ -156,7 +156,7 @@ def cmd_talk(args) -> int:
     print(turn.text or "(말이 없다)")
     print(
         f"  ({turn.model} · 요청 {turn.requests}회 · "
-        f"입력 {turn.input_tokens:,}(캐시 {turn.cached_tokens:,}) "
+        f"입력 {turn.input_tokens:,}(캐시 {turn.cached_tokens:,} 한번최대 {turn.peak_tokens:,}) "
         f"출력 {turn.output_tokens:,} · {turn.seconds:.1f}초"
         + (f" · 도구 {', '.join(c['name'] for c in turn.tool_calls)}" if turn.tool_calls else "")
         + ")",
