@@ -406,6 +406,47 @@ def _watch(item: Item, ears) -> tuple[str, list]:
     return f"{head} {len(shots)}장 봄 {said}".strip(), shots
 
 
+def mask_markers(text: str) -> str:
+    """`[사진:a1b2…]` → `[사진]`. **모델이 볼 글에만 쓴다.**
+
+    ★ **모델은 본 것을 베낀다.** 작업 기억 120발언에 진짜 id 가 28개 실려
+      있었다(2026-09-02 실측). 우리가 만들라고 하는 바로 그 모양이 눈앞에
+      28개 있으니, 작은 모델이 그중 하나를 골라 적는 것은 당연한 일이다.
+      실제로 그랬다 — 유나가 `(3152f31e1fb34aa9) 오빠가 원했던 모습이야` 를
+      내보냈고 그건 **아까 보낸 사진의 id** 였다. 오빠가 "사진이 안보이는데".
+
+      걷어내는 손을 모양마다 하나씩 늘리는 것이 두더지 잡기가 된 이유가
+      이것이다. `[사진:id]` 를 막으면 `(id)` 로, 그걸 막으면 또 다른 모양으로
+      나온다. **못 만들게 하는 것이 막는 것보다 낫다** — 본 적이 없으면
+      그럴듯한 id 를 지어낼 수가 없다.
+
+    ★ **지우지 않고 이름만 남긴다.** `strip_markers` 는 통째로 걷는데, 그러면
+      "여기 사진이 하나 있었다" 가 사라져서 모델이 자기가 뭘 보냈는지 모른다.
+      무엇이 있었는지는 알아야 하고, 그것을 **가리키는 열쇠**만 안 주면 된다.
+
+    ★ **화면과 저장에는 안 쓴다.** 거기는 표시가 있어야 사진이 뜬다
+      (`for_screen` 은 쪽지를 떼는 것이지 표시를 떼는 것이 아니다).
+    """
+    out, i = [], 0
+    while True:
+        j, label = -1, ""
+        for lb in LABELS:
+            k = text.find(f"[{lb}:", i)
+            if k != -1 and (j == -1 or k < j):
+                j, label = k, lb
+        if j == -1:
+            out.append(text[i:])
+            break
+        end = text.find("]", j)
+        if end == -1:
+            out.append(text[i:])
+            break
+        out.append(text[i:j])
+        out.append(f"[{label}]")
+        i = end + 1
+    return "".join(out)
+
+
 def strip_markers(text: str) -> str:
     """표시를 걷어낸 글. 화면과 모델에는 표시가 안 보여야 한다."""
     out, i = [], 0

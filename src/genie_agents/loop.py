@@ -32,6 +32,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from . import media
 from .policy import DEFAULT, Policy
 
 
@@ -157,7 +158,18 @@ def result_blocks(out: Any, tool_use_id: str) -> list[dict]:
         {
             "type": "tool_result",
             "tool_use_id": tool_use_id,
-            "content": json.dumps(out, ensure_ascii=False, default=str),
+            # ★ **첨부 열쇠는 모델에게 안 보인다**(`media.mask_markers`).
+            #   도구가 돌려주는 표시에는 진짜 id 가 들어 있고 **장부가 그걸
+            #   읽는다**(`_Session.minted` — 이번 턴에 도구가 붙인 것만 본문에
+            #   남긴다). 그러니 도구 쪽에서 가리면 안 되고, **글로 바뀌는 이
+            #   한 곳**에서 가린다.
+            #
+            # ★ 왜 가리나. 모델은 본 것을 베낀다. 2026-09-01 에 예나가 작업
+            #   기억에 보이던 id 를 그대로 적어 **유나 얼굴을 자기 모습으로**
+            #   냈고, 2026-09-02 에는 유나가 아까 보낸 사진의 id 를 괄호에 넣어
+            #   적어서 화면에 id 만 떴다. 못 만들게 하는 것이 막는 것보다 낫다.
+            "content": media.mask_markers(
+                json.dumps(out, ensure_ascii=False, default=str)),
         }
     ]
 
