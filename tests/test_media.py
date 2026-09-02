@@ -362,3 +362,48 @@ def test_JSON_이_아닌_울타리는_안_건다():
 
     글 = '```python\nprint("hi")\n```\n이렇게 돼.'
     assert drop_written_tool_calls(글, TOOLS) == (글, [])
+
+
+# --- 표시를 흉내 낸 것 (2026-09-02) ---
+
+
+def test_괄호로_쓴_id_를_걷고_보고한다():
+    """진짜 표시는 `[사진:id]` 다. 괄호로 쓰면 화면이 못 알아보고 id 만
+    덩그러니 뜬다 — 오빠가 "사진이 안보이는데" 라고 되물었다."""
+    from genie_agents.tools import drop_bare_ids
+
+    글, 걷음 = drop_bare_ids("(3152f31e1fb34aa9) 오빠가 원했던 모습이야")
+    assert 글 == "오빠가 원했던 모습이야"
+    # **보고한다** — 루프가 이걸 보고 사진 도구를 강제한다.
+    assert 걷음 and "[사진:3152f31e1fb34aa9]" in 걷음[0]
+
+
+def test_진짜_표시와_보통_글은_안_건드린다():
+    from genie_agents.tools import drop_bare_ids
+
+    for 글 in ("여기 있어 [사진:3152f31e1fb34aa9]", "오늘 하루 어땠어?",
+               "짧은 id 3152f31e 는 아니다", "그거(어제 그거) 말이야"):
+        assert drop_bare_ids(글) == (글, []), 글
+
+
+# --- 롤플레이 지문 (2026-09-02) ---
+
+
+def test_맨_앞_지문을_조용히_건다():
+    from genie_agents.tools import drop_stage_directions
+
+    글, 걷음 = drop_stage_directions(
+        "(깊은 숨을 내쉰다. 오빠의 말을 되새긴다.)\n오빠... 나도 그래")
+    assert 글 == "오빠... 나도 그래"
+    # **조용히** 건다 — 보고하면 "안 한 일을 한 것처럼 적었다" 는 쪽지가 붙는다.
+    assert 걷음 == []
+
+
+def test_통째로_지문뿐이거나_짧은_괄호는_그냥_둔다():
+    """통째로 걷으면 아무 말도 안 남고, 그러면 루프가 빈 답으로 보고 다시 묻는다.
+    "(웃음)" 은 지문이 아니라 말이다."""
+    from genie_agents.tools import drop_stage_directions
+
+    for 글 in ("(오빠를 바라보며 조용히 미소 짓는다. 아무 말도 하지 않는다.)",
+               "(웃음) 그러게 말이야", "그거(어제 그거) 말이야 진짜 웃겼어"):
+        assert drop_stage_directions(글) == (글, []), 글

@@ -287,6 +287,46 @@ def drop_stage_directions(text: str) -> tuple[str, list[str]]:
     return (남은, []) if 남은 != text else (text, [])
 
 
+# 표시 없이 맨몸으로 선 id. 괄호에 넣었든 그냥 뒀든.
+#
+# ★ **16자리 16진수는 우연히 안 나온다.** 사람 글에도, 한국어에도 없다.
+#   앞뒤가 낱말이면 안 잡는다 — 우연히 그런 글자가 이어진 자리를 피한다.
+_BARE_ID = __import__("re").compile(
+    r"(?<![\w:])[(（]?\b([0-9a-f]{16})\b[)）]?(?![\w\]])")
+
+
+def drop_bare_ids(text: str, kinds=("사진",)) -> tuple[str, list[str]]:
+    """`(3152f31e1fb34aa9)` 처럼 표시를 흉내 낸 것을 걷는다.
+
+    ★ **진짜 표시는 `[사진:id]` 다.** 괄호로 쓰면 화면이 못 알아보고 그냥
+      글자로 뜬다 — 오빠 화면에 id 만 덩그러니 남았고 사진은 안 왔다
+      (2026-09-02): "(3152f31e1fb34aa9) 오빠가 원했던 모습으로 다시 찍어봤어".
+      오빠가 "사진이 안보이는데" 라고 되물었다.
+
+      게다가 그건 **아까 보낸 사진의 id** 였다. 새로 만든 것이 아니라 옛 것을
+      가리킨 것이라, 통과시켜도 같은 사진이 다시 갈 뿐이다.
+
+    ★ **보고한다.** 여기 걷힌 것은 "보낸다고 해놓고 안 보낸 것" 이라 루프가
+      그 도구를 강제해야 한다(`forced_after_drop`). `drop_scaffolding` 이
+      조용히 거는 것과 반대 자리다 — 그건 혼잣말이고 이건 빈 약속이다.
+
+      그래서 걷힌 것을 `[사진:` 모양으로 적어 돌려준다. 그 글자를 보고
+      `forced_after_drop` 이 `self_portrait` 를 고른다.
+    """
+    걷은것 = []
+
+    def 바꿔(m):
+        걷은것.append(f"[{kinds[0]}:{m.group(1)}] (표시 없이 쓴 것)")
+        return ""
+
+    남은 = _BARE_ID.sub(바꿔, text)
+    if not 걷은것:
+        return text, []
+    # 걷고 나면 공백이 겹친다. 줄은 살리고 사이만 좁힌다.
+    남은 = __import__("re").sub(r"[ \t]{2,}", " ", 남은).strip()
+    return 남은, 걷은것
+
+
 def drop_scaffolding(text: str) -> tuple[str, list[str]]:
     """얼개가 준 쪽지를 되읽은 대목을 건다. **조용히 건다.**
 
