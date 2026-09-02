@@ -211,6 +211,43 @@ def test_도구_목록을_옮겨_보낸다(monkeypatch):
     assert 보낸["function"]["parameters"] == WRITE["input_schema"]
 
 
+def test_못박은_도구를_실어_보낸다(monkeypatch):
+    """★ 루프는 앤트로픽 말로 준다 — OpenAI 말로 옮겨야 저쪽이 알아듣는다.
+
+    이 자리가 비어 있어서 강제가 통째로 없는 일이었다(2026-09-01). 지어낸
+    `[사진:...]` 을 걷고 `self_portrait` 를 강제하며 다시 물었는데, 여기서
+    조용히 버려지고 화면에는 "강제한다" 만 찍혔다. 오빠가 사진을 세 번 물었고
+    세 번 다 못 받았다.
+    """
+    f = Fake()
+    c = 클라(f, monkeypatch)
+    c.messages.create(model="m", max_tokens=8, tools=[WRITE],
+                      tool_choice={"type": "tool", "name": "unseen_note"},
+                      messages=[{"role": "user", "content": "x"}])
+
+    assert f.sent["tool_choice"] == {
+        "type": "function", "function": {"name": "unseen_note"}}
+
+
+def test_auto_는_안_싣는다(monkeypatch):
+    """서버 기본이 이미 `auto` 다. 이름이 없으면 못박을 것도 없다."""
+    f = Fake()
+    c = 클라(f, monkeypatch)
+    c.messages.create(model="m", max_tokens=8, tools=[WRITE],
+                      tool_choice={"type": "auto"},
+                      messages=[{"role": "user", "content": "x"}])
+    assert "tool_choice" not in f.sent
+
+
+def test_도구가_없으면_못박지도_않는다(monkeypatch):
+    f = Fake()
+    c = 클라(f, monkeypatch)
+    c.messages.create(model="m", max_tokens=8,
+                      tool_choice={"type": "tool", "name": "unseen_note"},
+                      messages=[{"role": "user", "content": "x"}])
+    assert "tool_choice" not in f.sent
+
+
 def test_스키마_없는_서버도구는_안_보낸다(monkeypatch):
     """`{"type": "web_search_..."}` 같은 것. 로컬엔 그런 게 없고, 보내면 400 이다."""
     f = Fake()

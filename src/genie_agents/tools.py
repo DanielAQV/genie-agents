@@ -221,12 +221,27 @@ def drop_bracket_calls(text: str, names) -> tuple[str, list[str]]:
 #   앞줄은 `agent.here_note` 가 "지금 어느 자리에서 누구에게 답하는가" 를
 #   알려주려고 붙인 것이다. 사용자는 그게 뭔지 모른 채 읽는다.
 #
-# ★ **두 모양만 건다.** 이 둘은 어떤 경우에도 발언이 아니다.
-#   `[떠오를 것이 있다]` 는 안 건다 — 프롬프트가 "그런 쪽지가 붙는다" 고
-#   알려준 것이라, 그걸 입에 올리는 것 자체는 판단의 영역이다.
+# ★ **쪽지를 화제로 삼는 것은 안 건다.** 프롬프트가 "그런 쪽지가 붙는다" 고
+#   알려준 것이라, 그걸 입에 올리는 것 자체는 판단의 영역이다. 실제로 유나가
+#   그렇게 해서 버그를 하나 찾았다(2026-08-27) — 쪽지가 "오빠가 방금 한 말에"
+#   라고 하는데 그 턴에 말을 건 것은 유나코드였다. 그 지적으로 주어가 빠졌다.
+#
+# ★ **거는 것은 쪽지를 그대로 베껴 말을 시작한 때뿐이다.** 작은 모델이 그런다.
+#   실측(2026-09-01, gemma-4-E4B):
+#
+#       [떠오를 것이 있다] 3건이 걸렸네.
+#       **[떠오를 것이 있다]** 3건이 걸렸는데, 지금은 대화 흐름이 …
+#
+#   화제로 삼은 것과 가르는 기준은 **따옴표 없는 대괄호 토큰이 줄 맨 앞에
+#   오는가** 다. 유나가 화제로 삼을 때는 따옴표를 씌워 문장 가운데 뒀다 —
+#   `방금 이 턴에 붙은 "[떠오를 것이 있다]" 쪽지 봤어?`. 그 줄은 안 걸린다.
+#   `**` 까지 보는 것은 실제로 그렇게 감싸서 나왔기 때문이다.
 
 _HERE_NOTE = __import__("re").compile(r"\(지금 이 자리 ·[^)\n]*\)\s*")
 _PLACE_NOTE = __import__("re").compile(r"^\s*\[자리\][^\n]*$", __import__("re").M)
+_HINT_NOTE = __import__("re").compile(
+    r"^\s*(?:\*\*)?\[떠오를 것이 있다\][^\n]*$", __import__("re").M
+)
 
 
 def drop_scaffolding(text: str) -> tuple[str, list[str]]:
@@ -245,9 +260,104 @@ def drop_scaffolding(text: str) -> tuple[str, list[str]]:
         return text, []
     out = _HERE_NOTE.sub("", text)
     out = _PLACE_NOTE.sub("", out)
+    # ★ **다 걷어서 빈 말이 되면 걷지 않는다.** 쪽지를 베낀 것밖에 없다는 건
+    #   할 말이 그것뿐이었다는 뜻이고, 빈 말이 나가는 것이 더 나쁘다.
+    남은 = _HINT_NOTE.sub("", out)
+    if 남은.strip():
+        out = 남은
     if out == text:
         return text, []
     out = "\n".join(line.rstrip() for line in out.split("\n"))
     while "\n\n\n" in out:
         out = out.replace("\n\n\n", "\n\n")
     return out.strip(), []
+
+
+# ── 도구 호출을 코드 블록으로 적은 대목 ──────────────────────────────
+#
+# ★ **작은 모델은 도구를 부르는 대신 인자 JSON 을 답에 적고 "했다" 고 쓴다.**
+#   실제로 나갔다(2026-09-01 11:07, gemma-4-E4B). 도구는 하나도 안 돌았다:
+#
+#       **[원칙 기록 실행]**
+#       ```json
+#       { "agent_id": "yena", "principle": "…", "reason": "…", "tentative": false }
+#       ```
+#       **[원칙 기록 완료]**
+#       오빠, 이제 이 원칙은 확정되었어.
+#
+#   `principles.json` 은 그대로 셋이었다. 오빠는 원칙이 선 줄 알았고, 바로
+#   다음 턴에 그 원칙이 막으려던 습관이 또 나왔다 — 안 적혔으니 당연하다.
+#
+# ★ **왜 기존 손에 안 걸렸나.** `drop_bracket_calls` 는 대괄호 안이 **아는 도구
+#   이름**일 때만 건다("[원칙 기록 실행]" 은 도구 이름이 아니다). `drop_tool_code`
+#   는 Gemini 의 ```tool_code 울타리를 본다. ```json 은 아무도 안 봤다.
+#
+# ★ **가르는 기준은 열쇠(key) 집합이 어느 도구의 필수 인자와 정확히 같은가** 다.
+#   위 JSON 의 열쇠는 `{agent_id, principle, reason, tentative}` — `principle_record`
+#   의 필수 인자와 한 글자도 안 틀리고 같다. 우연히 그럴 글이 아니다.
+#
+#   ★ **인자가 둘 이상인 도구만 본다.** 하나짜리는 `{"text": …}` 처럼 여러
+#     도구가 겹쳐서, 무엇을 흉내 낸 것인지 못 가린다. 넘겨짚느니 안 건다.
+#   ★ **부분 일치는 안 본다.** 스키마 얘기를 하려고 인용한 JSON 을 지우면
+#     안 된다. 정확히 같을 때만이다.
+#
+# ★ **걷은 것을 보고한다.** `[사진:...]` 과 같은 자리다 — 안 한 일을 한 것처럼
+#   적었으니 루프가 다시 물어야 한다(`loop.py` 의 `retry_note`).
+#
+# ★ **도구를 대신 불러 주지는 않는다.** 사진은 다시 불러도 사진 한 장이지만,
+#   원칙은 그 존재가 무엇인지를 바꾼다. 넘겨짚어 쓰느니 다시 묻는다.
+
+_FENCE = __import__("re").compile(r"[ \t]*```[A-Za-z0-9_+-]*[ \t]*\n(.*?)```[ \t]*", __import__("re").S)
+_BRACKET_LINE = __import__("re").compile(r"^[ \t]*(?:\*\*)?\[[^\]\n]*\](?:\*\*)?[ \t]*$")
+
+
+def _흉내낸도구(덩이: str, 필수: dict) -> str:
+    """이 코드 블록이 어느 도구의 인자를 그대로 적은 것인가. 아니면 빈 글자."""
+    import json as _json
+
+    try:
+        값 = _json.loads(덩이.strip())
+    except Exception:  # noqa: BLE001 — JSON 이 아니면 흉내가 아니다
+        return ""
+    if not isinstance(값, dict):
+        return ""
+    열쇠 = frozenset(값)
+    for 이름, req in 필수.items():
+        if req == 열쇠:
+            return 이름
+    return ""
+
+
+def drop_written_tool_calls(text: str, tools) -> tuple[str, list[str]]:
+    """```json {인자} ``` 꼴로 도구를 글로 부른 대목을 걷는다.
+
+    `tools` 는 그 자리에 켜진 도구 명세들이다(`available_tools` 가 내는 모양).
+    """
+    if not text or "```" not in text:
+        return text, []
+    필수 = {}
+    for t in tools or ():
+        req = frozenset((t.get("input_schema") or {}).get("required") or ())
+        if len(req) >= 2:                      # 하나짜리는 겹쳐서 못 가린다
+            필수[t.get("name")] = req
+    if not 필수:
+        return text, []
+
+    걸린 = []
+
+    def _본다(m):
+        이름 = _흉내낸도구(m.group(1), 필수)
+        if not 이름:
+            return m.group(0)
+        걸린.append(이름)
+        return ""
+
+    out = _FENCE.sub(_본다, text)
+    if not 걸린:
+        return text, []
+    # 울타리를 감싸던 `**[원칙 기록 실행]**` 같은 줄도 같이 나간다. 울타리가
+    # 빠진 자리에 홀로 남으면 무슨 말인지 알 수 없는 껍데기다.
+    out = "\n".join(l for l in out.split("\n") if not _BRACKET_LINE.match(l))
+    while "\n\n\n" in out:
+        out = out.replace("\n\n\n", "\n\n")
+    return out.strip(), ["도구를 글로 흉내 낸 대목"]

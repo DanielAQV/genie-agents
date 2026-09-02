@@ -40,11 +40,14 @@ def 붙은것(monkeypatch):
     sl = _serve_local()
     본것 = {}
 
-    def 가짜(messages, max_tokens, temperature, tools=None):
+    def 가짜(messages, max_tokens, temperature, tools=None, tool_choice=None,
+            repeat_penalty=1.0):
         본것["messages"] = messages
         본것["max_tokens"] = max_tokens
         본것["temperature"] = temperature
         본것["tools"] = tools
+        본것["tool_choice"] = tool_choice
+        본것["repeat_penalty"] = repeat_penalty
         return {"text": '{"opens": [], "moves": [], "unresolved": []}',
                 "in": 123, "out": 45, "finish": "stop"}
 
@@ -154,6 +157,21 @@ def test_도구가_생성까지_내려간다(붙은것):
 
     보낸 = 본것["tools"]
     assert 보낸 and 보낸[0]["function"]["name"] == "unseen_note"
+
+
+def test_못박은_도구가_생성까지_내려간다(붙은것):
+    """★ 여기가 끊겨 있었다(2026-09-01). 어댑터가 `tool_choice` 를 안 실었고
+    서버는 `"auto"` 로 못박혀 있어서, 루프의 강제가 한 번도 일어나지 않았다.
+    화면에는 "self_portrait 를 강제한다" 만 찍혔고 사진은 안 나갔다."""
+    c, 본것, _sl, _port = 붙은것
+    도구 = {"name": "unseen_note", "description": "적는다",
+            "input_schema": {"type": "object", "properties": {}}}
+    c.messages.create(model="m", max_tokens=8, tools=[도구],
+                      tool_choice={"type": "tool", "name": "unseen_note"},
+                      messages=[{"role": "user", "content": "x"}])
+
+    assert 본것["tool_choice"] == {
+        "type": "function", "function": {"name": "unseen_note"}}
 
 
 def test_부른_것을_tool_calls_로_돌려준다():

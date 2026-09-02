@@ -49,6 +49,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 
 from .. import env
 from .base import Response, TextBlock, ToolUseBlock, Usage
@@ -75,7 +76,7 @@ def default_model(fast: bool = False) -> str:
     return env.get("LOCAL_MODEL") or DEFAULT_MODEL
 
 
-def scopes(default: frozenset[str] = frozenset()) -> frozenset[str]:
+def scopes(default: frozenset[str] = frozenset(), root=None) -> frozenset[str]:
     """이 기계 안의 모델로 갈 자리들. **적힌 것만 간다.**
 
         {프리픽스}_LOCAL_SCOPES=conversation,wake,일상
@@ -87,14 +88,79 @@ def scopes(default: frozenset[str] = frozenset()) -> frozenset[str]:
       같은 파싱을 하고 있었다(2026-09-01 에 합쳤다). 자리 이름을 쉼표로 가르는
       규칙이 두 벌이면 그중 하나가 언젠가 낡는다.
 
+    ★ **고른 것 > 환경 > 기본.** 환경이 이기게 두면 화면에서 고른 것이 조용히
+      무시되고, 오빠는 왜 안 바뀌는지 알 길이 없다(`schedule.spec` 과 같은 순서).
+
     `default` 는 **아무것도 안 적혔을 때**의 값이다. 유나에게는 일상이 이미
     로컬이던 이력이 있어서 그 자리를 기본값으로 넘긴다 — 배포하다 만 상태에서
     돌던 것이 조용히 클라우드로 돌아가지 않게.
     """
+    골라둔 = saved(root)
+    if 골라둔 is not None:
+        return 골라둔
     raw = env.get("LOCAL_SCOPES")
     if raw is None:
         return default
     return frozenset(s.strip() for s in raw.split(",") if s.strip())
+
+
+# ── 화면에서 고르는 자리 ──────────────────────────────────────────────
+#
+# ★ **`.env` 는 프로세스가 뜰 때 한 번 읽는다.** 거기서 고치면 재시작해야 하고,
+#   재시작은 그 순간 오가던 말을 끊는다. 파일은 매 턴 읽으므로 **다음 한 마디
+#   부터** 듣는다. 잠자는 표(`schedule.FILE`)를 화면이 고치는 것과 같은 자리다.
+#
+# ★ **빈 파일과 없는 파일은 다르다.** 빈 파일은 "전부 클라우드" 라는 **고른
+#   결과**고, 없는 파일은 아직 안 골랐다는 뜻이다. 둘을 뭉개면 화면에서
+#   "클라우드" 를 고른 순간 환경 변수가 되살아난다.
+FILE = "local_scopes.txt"
+
+
+def path(root=None):
+    from genie_agents.store import default_root
+
+    return Path(default_root() if root is None else root) / FILE
+
+
+def saved(root=None) -> frozenset[str] | None:
+    """화면에서 골라 둔 자리들. **안 골랐으면 `None`** (빈 집합이 아니다)."""
+    try:
+        raw = path(root).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    return frozenset(s.strip() for s in raw.split(",") if s.strip())
+
+
+def check(names, known) -> str:
+    """저장해도 되나. 되면 빈 글, 안 되면 **왜인지**.
+
+    ★ **모르는 이름은 여기서 막는다.** 읽는 쪽(`scopes`)은 그냥 집합을 내므로,
+      오타가 들어가면 아무 자리도 안 걸리고 조용히 전부 클라우드가 된다 —
+      화면은 "저장했다" 는데 값은 안 바뀐다.
+    """
+    모르는 = [n for n in names if n not in set(known)]
+    if 모르는:
+        return f"모르는 자리다: {', '.join(모르는)}  (있는 것: {', '.join(sorted(known))})"
+    return ""
+
+
+def save(names, known, root=None) -> str:
+    """고른 것을 둔다. 모르는 이름이 있으면 **안 두고** 왜인지 돌려준다."""
+    골라 = [str(n).strip() for n in (names or ()) if str(n).strip()]
+    why = check(골라, known)
+    if why:
+        return why
+    p = path(root)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(",".join(골라), encoding="utf-8")
+    return ""
+
+
+def source(root=None) -> str:
+    """지금 값이 어디서 왔나 — 화면이 보여줘야 왜 그런지 안다."""
+    if saved(root) is not None:
+        return "화면"
+    return "환경" if env.get("LOCAL_SCOPES") is not None else "기본"
 
 
 def switched(frm: str, to: str, why: str = "") -> None:
@@ -274,6 +340,18 @@ class _Messages:
         spec = _tools(tools)
         if spec:
             body["tools"] = spec
+            # ★ **못박은 도구를 실어 보낸다.** 루프는 앤트로픽 말로 준다
+            #   (`{"type": "tool", "name": ...}`) — OpenAI 말로 옮긴다.
+            #   `auto` · `any` 는 안 싣는다. 서버 기본이 이미 `auto` 고,
+            #   `any` 에 해당하는 것이 저쪽에 없다.
+            #
+            #   ★ 이 세 줄이 없어서 강제가 통째로 없는 일이었다(2026-09-01).
+            #     여기서 조용히 버려지고, 화면에는 "강제한다" 만 찍혔다.
+            골라 = extra.get("tool_choice")
+            이름 = 골라.get("name") if isinstance(골라, dict) else None
+            if 이름:
+                body["tool_choice"] = {"type": "function",
+                                       "function": {"name": 이름}}
         req = urllib.request.Request(
             self.endpoint,
             data=json.dumps(body, ensure_ascii=False).encode("utf-8"),

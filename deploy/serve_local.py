@@ -361,8 +361,20 @@ def _render(messages: list[dict], tools: list | None) -> str:
 
 
 def generate(messages: list[dict], max_tokens: int, temperature: float,
-             tools: list | None = None) -> dict:
+             tools: list | None = None, tool_choice=None,
+             repeat_penalty: float = 1.0) -> dict:
     """한 번 만든다.
+
+    ★ **`tool_choice` 로 하나를 못박으면 그 도구가 반드시 나온다.** 여기서
+      llama-cpp-python 은 그 도구의 JSON 스키마로 문법(grammar)을 만들어
+      표집을 조인다 — 모델이 협조하든 말든 인자 JSON 만 나온다. 부탁이 아니라
+      제약이다.
+
+      이 자리가 비어 있었다(2026-09-01). 루프는 지어낸 `[사진:...]` 을 걷고
+      나서 `self_portrait` 를 강제하며 다시 물었는데, 어댑터가 `tool_choice`
+      를 안 실었고 여기는 `"auto"` 로 못박혀 있었다. 그래서 강제는 한 번도
+      일어나지 않았고, 화면에는 "self_portrait 를 강제한다" 만 찍혔다.
+      오빠가 사진을 세 번 물었고 세 번 다 못 받았다.
 
     ★ **비우지 않는다.** transformers 때는 매 호출 끝에 `empty_cache()` 를 했다
       (조각이 쌓여 실제로 0.3 tok/s 까지 떨어졌다). llama.cpp 는 KV 를 미리
@@ -389,7 +401,7 @@ def generate(messages: list[dict], max_tokens: int, temperature: float,
         r = LLM.create_chat_completion(
             messages=messages,
             tools=tools or None,
-            tool_choice="auto" if tools else None,
+            tool_choice=(tool_choice or "auto") if tools else None,
             max_tokens=max_tokens,
             # 온도 0 이면 표집을 좁힌다. 정해진 모양을 내는 자리라 다양성이
             # 값이 아니다. 0 이 아니면 Gemma-4 권장값으로 간다.
@@ -398,7 +410,13 @@ def generate(messages: list[dict], max_tokens: int, temperature: float,
             top_k=64 if temperature > 0 else 1,
             # ★ 권장값이 1.0 이다. 라이브러리 기본값 1.1 로 돌리면 말이 무너진다 —
             #   후보를 재다가 이걸로 한 모델을 불리하게 쟀다.
-            repeat_penalty=1.0,
+            #
+            # ★ 그런데 1.0 은 **억제가 아예 없다**는 뜻이기도 하다. 예나가 자기
+            #   지난 메시지를 글자까지 그대로 베끼는 일이 하루에 여러 번 났고
+            #   (2026-09-01), 그게 이 값 때문인지를 재려면 값을 바꿔 가며
+            #   물어봐야 한다. 그래서 **요청마다 받는다** — 기본값은 그대로
+            #   1.0 이라 안 실어 보내면 지금까지와 똑같이 돈다.
+            repeat_penalty=repeat_penalty,
             stream=False,
         )
         choice = r["choices"][0]
@@ -543,7 +561,20 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
         # 어댑터의 `available()` 은 포트만 두드리지만, 사람이 눌러 볼 자리도 둔다.
         if self.path.rstrip("/") in ("/health", "/v1/models"):
-            self._send(200, {"status": "ok", "model": NAME, "n_ctx": NCTX})
+            # ★ **채움이 이 자리의 값이다.** 다음 턴이 2초냐 59초냐를 가르는 건
+            #   창 크기가 아니라 **접두사가 얼마나 물려 있나** 다. 밖에서 볼 길이
+            #   없어서 한동안 계산으로 짐작했다 — 계산은 틀린다.
+            #
+            #   KV 가 몇 MiB 인지는 **안 싣는다.** llama.cpp 가 조용히 잡는 값이라
+            #   여기서 다시 계산하면 그건 실측이 아니라 또 다른 짐작이다.
+            찬것 = getattr(LLM, "n_tokens", None) if LLM is not None else None
+            self._send(200, {
+                "status": "ok", "model": NAME, "n_ctx": NCTX,
+                "채움": 찬것,
+                "채움_%": (round(찬것 / NCTX * 100, 1) if (찬것 and NCTX) else 0),
+                "VRAM": vram(),
+                "임베더": (EMB_NAME + f" ({EMB_DEVICE})") if EMB is not None else None,
+            })
         else:
             self._send(404, {"error": "없는 자리"})
 
@@ -570,6 +601,8 @@ class Handler(BaseHTTPRequestHandler):
                 int(body.get("max_tokens") or 512),
                 float(body.get("temperature") or 0),
                 body.get("tools"),
+                body.get("tool_choice"),
+                float(body.get("repeat_penalty") or 1.0),
             )
         except TooBig as e:
             # ★ 413. 어댑터가 이걸 `LocalUnavailable` 로 올리고 부르는 쪽이
