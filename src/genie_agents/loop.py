@@ -251,16 +251,24 @@ def run(
             before = len(turn.dropped)
             said = _clean("\n\n".join(chunks), policy, turn)
             turn.text = said
-            # 다듬고 났더니 남는 게 없으면 한 번만 다시 묻는다.
-            if not said and policy.retry_when_empty and not retried:
-                retried = True
-                print("  (말이 통째로 걷어낼 것뿐이라 한 번 다시 묻는다)", file=sys.stderr)
-                continue
-            # ★ **글은 남았는데 걷어낸 것이 있으면 알려주고 다시 묻는다.**
+            # ★ **걷어낸 것이 있으면 그것부터 본다 — 글이 남았든 안 남았든.**
+            #
+            #   예전엔 "남는 게 없으면" 을 먼저 봤다. 그런데 답이 통째로
+            #   지어낸 표시 하나뿐인 자리가 바로 **제일 강제가 필요한 자리**다.
+            #   그게 빈 글 쪽으로 새서 한-번 깃발만 태우고, 두 번째에는 아무
+            #   일도 안 일어났다. 실측(2026-09-02, 예나·로컬):
+            #
+            #       (걷어냈다: [사진:a4c45b…])
+            #       (말이 통째로 걷어낼 것뿐이라 한 번 다시 묻는다)   ← 강제 없음
+            #       (걷어냈다: [사진:9c74e4…])                      ← 아무것도 안 함
+            #       도구 [principle_record]
+            #
+            #   오빠가 사진을 물었고 답이 아예 안 왔다.
+            #
             #   떼기만 하면 표시는 사라져도 "짠! 여기 있어" 는 남아서, 받는
             #   쪽에서는 보낸다고 해놓고 안 온 것이 된다. 무엇이 실제로
             #   일어났는지 알려주면 이번엔 도구를 부를 수도 있다.
-            if (said and len(turn.dropped) > before and policy.retry_note
+            if (len(turn.dropped) > before and policy.retry_note
                     and 강제한횟수 < 강제상한):
                 강제한횟수 += 1
                 # ★ **다시 묻기만 하면 또 안 부를 수 있다.** 그러면 "보낼게" 를
@@ -273,6 +281,11 @@ def run(
                       + (f" — {force} 를 강제한다)" if force else ")"), file=sys.stderr)
                 messages.append({"role": "assistant", "content": response.content})
                 messages.append({"role": "user", "content": policy.retry_note})
+                continue
+            # 걷어낼 것도 없었는데 남는 게 없으면 한 번만 다시 묻는다.
+            if not said and policy.retry_when_empty and not retried:
+                retried = True
+                print("  (말이 통째로 걷어낼 것뿐이라 한 번 다시 묻는다)", file=sys.stderr)
                 continue
 
         if turn.stop_reason == "pause_turn" and pauses < policy.max_pauses:
