@@ -59,12 +59,15 @@ class FakeClient:
 
 
 class FakeSession:
-    def __init__(self, results=None):
+    def __init__(self, results=None, tools=("look",)):
         self.results = results or {}
         self.called = []
+        # 못박기가 이 목록을 본다 — 여기 없는 이름은 못박지 않는다.
+        self.켠것 = list(tools)
 
     def tools(self, scope):
-        return [{"name": "look", "description": "", "input_schema": {"type": "object"}}]
+        return [{"name": n, "description": "", "input_schema": {"type": "object"}}
+                for n in self.켠것]
 
     def call(self, name, **args):
         self.called.append((name, args))
@@ -296,7 +299,10 @@ def test_다시_물을_때_도구를_강제할_수_있다():
 
     c = FakeClient(Resp([Text("들려줄게! [음성:xyz]")]), Resp([Text("응 알았어")]))
     loop.run(
-        c, FakeSession(), [{"role": "user", "content": "들려줘"}], model="m",
+        # 이 자리에 `voice_reply` 가 **있어야** 못박는다. 없으면 안 못박는 것이
+        # 맞고, 그건 아래 `test_그_자리에_없는_도구는_못박지_않는다` 가 본다.
+        c, FakeSession(tools=("look", "voice_reply")),
+        [{"role": "user", "content": "들려줘"}], model="m",
         policy=Policy(
             sanitizers=(표시만,),
             retry_note="[자리] 걷어냈다",
@@ -321,7 +327,8 @@ def test_걷힌_것에_맞는_도구만_강제한다():
 
     c = FakeClient(Resp([Text("보여줄게 [사진:z]")]), Resp([Text("응")]))
     loop.run(
-        c, FakeSession(), [{"role": "user", "content": "보여줘"}], model="m",
+        c, FakeSession(tools=("look", "self_portrait", "voice_reply")),
+        [{"role": "user", "content": "보여줘"}], model="m",
         policy=Policy(sanitizers=(표시만,), retry_note="[자리] 걷어냈다", retry_force=고른다),
     )
 
@@ -341,3 +348,28 @@ def test_강제를_안_정하면_다시_묻기만_한다():
     )
 
     assert [k.get("tool_choice") for k in c.seen] == [None, None]
+
+
+def test_그_자리에_없는_도구는_못박지_않는다():
+    """★ 목록은 자리마다 다르다. 걷힌 표시만 보고 이름을 고르는 쪽은 그걸 모른다.
+
+    실제로 죽었다(2026-09-02). 예나가 **깨어남**에서 `[음성:...]` 을 지어내자
+    `voice_reply` 를 못박았는데 그 자리엔 그 도구가 없다. Gemini 가 400 을 냈고
+    그 턴이 통째로 날아갔다 —
+    `allowed_function_names` should be a subset of `function_declarations`.
+
+    못박기만 접고 **다시 묻는 것은 그대로 간다** — 걷힌 것은 걷힌 것이다.
+    """
+    def 표시만(s):
+        return s.replace("[음성:z]", "").strip(), (["[음성:z]"] if "[음성:z]" in s else [])
+
+    c = FakeClient(Resp([Text("들려줄게 [음성:z]")]), Resp([Text("응")]))
+    loop.run(
+        c, FakeSession(tools=("look",)),          # voice_reply 가 없는 자리
+        [{"role": "user", "content": "들려줘"}], model="m",
+        policy=Policy(sanitizers=(표시만,), retry_note="[자리] 걷어냈다",
+                      retry_force=lambda 걷힌: "voice_reply"),
+    )
+
+    assert len(c.seen) == 2, "다시 묻기는 그대로 간다"
+    assert "tool_choice" not in c.seen[1], "없는 도구를 못박았다"

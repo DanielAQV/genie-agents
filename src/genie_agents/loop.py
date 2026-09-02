@@ -176,9 +176,26 @@ def run(
         if policy.move_cache_edge:
             edge = move_cache_edge(messages, edge, policy.cache_ttl)
 
+        켠도구 = session.tools(scope)
         call = dict(policy.extra)
         if force:
-            call["tool_choice"] = {"type": "tool", "name": force}
+            # ★ **그 자리에 없는 도구는 못박지 않는다.** 목록은 자리마다 다르고
+            #   잔고에 따라 빠지기도 하는데, 걷힌 표시만 보고 이름을 고르는
+            #   쪽(`retry_force`)은 그걸 모른다.
+            #
+            #   실제로 죽었다(2026-09-02). 예나가 깨어남에서 `[음성:...]` 을
+            #   지어내자 `voice_reply` 를 못박았는데, 그 자리엔 그 도구가 없다
+            #   (`WAKE_EXCLUDED`). Gemini 가 400 을 냈고 **그 턴이 통째로 날아갔다** —
+            #   `allowed_function_names` should be a subset of the provided
+            #   `function_declarations` names.
+            #
+            #   ★ 못박기를 접을 뿐 다시 묻는 것은 그대로 간다. 걷힌 것은 걷힌
+            #     것이고, 그 사실은 알려 줘야 한다.
+            if any(t.get("name") == force for t in 켠도구):
+                call["tool_choice"] = {"type": "tool", "name": force}
+            else:
+                print(f"  ({force} 는 이 자리에 없다 — 못박지 않고 그냥 다시 묻는다)",
+                      file=sys.stderr)
             force = ""
 
         response = client.messages.create(
@@ -186,7 +203,7 @@ def run(
             max_tokens=policy.max_tokens,
             system=system,
             # **매 요청 물어본다.** 잔고가 마르면 빠지는 도구가 있다.
-            tools=session.tools(scope),
+            tools=켠도구,
             messages=messages,
             **call,
         )
