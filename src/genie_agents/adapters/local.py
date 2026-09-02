@@ -397,8 +397,17 @@ class _Messages:
 
     def _고른다(self, body: dict, spec: list, chat: list[dict]) -> str:
         """도구를 고르는 걸음. 못 물어보면 빈 문자열 — 그러면 예전처럼 auto 로 간다."""
-        남은 = [t["function"]["name"] for t in spec
-                if t.get("function", {}).get("name") not in _이번턴에_부른것(chat)]
+        # ★ **한 턴에 한 번만 고른다.** 바퀴마다 물으면 문지기가 계속 "응" 하고
+        #   고르기는 남은 목록을 차례로 훑는다 — 예나가 한 턴에 principle_
+        #   observe·record·revise·verify·verify_by_outcome·retract 를 줄줄이
+        #   부르고 490초를 썼다(2026-09-02, 내가 만든 고장이다).
+        #
+        #   두 번째 도구가 정말 필요한 자리는 루프가 따로 본다 — 지어낸 것을
+        #   걷어내고 그 도구를 못박아 다시 묻는 길(`retry_force`)이 이미 있고,
+        #   실제로 그 길로 self_portrait 가 불렸다.
+        if _이번턴에_부른것(chat):
+            return "없음"
+        남은 = [t["function"]["name"] for t in spec if t.get("function", {}).get("name")]
         if not 남은:
             return "없음"
         try:

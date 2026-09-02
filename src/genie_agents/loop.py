@@ -184,6 +184,22 @@ def run(
     edge: dict | None = None
     pauses = 0
     retried = False
+    # ★ **걷어낸 것 때문에 다시 묻는 것은 따로 센다.**
+    #
+    #   예전엔 `retried` 하나가 셋을 다 막았고, 그래서 지어낸 표시가 한 턴에
+    #   두 번 나오면 두 번째는 걷히기만 하고 아무 일도 안 일어났다. 실측
+    #   (2026-09-02, 예나·로컬):
+    #
+    #       (걷어냈다: [사진:82173a…])  → 강제함 → self_portrait 불림  ✔
+    #       (걷어냈다: [사진:3e748c…])
+    #       (걷어냈다: [사진:1293c3…])  → 아무것도 안 함, 도구 [없음]   ✘
+    #
+    #   오빠는 사진을 물었고 화면에는 "보여줄게" 만 남았다.
+    #
+    #   ★ 그런데 무한히 열어 두지도 않는다. 강제해도 안 되는 자리가 있으면
+    #     바퀴만 돈다 — 두 번까지다.
+    강제한횟수 = 0
+    강제상한 = max(1, int(getattr(policy, "retry_force_max", 1) or 1))
     force = policy.force_first
 
     for _ in range(policy.max_turns):
@@ -244,8 +260,9 @@ def run(
             #   떼기만 하면 표시는 사라져도 "짠! 여기 있어" 는 남아서, 받는
             #   쪽에서는 보낸다고 해놓고 안 온 것이 된다. 무엇이 실제로
             #   일어났는지 알려주면 이번엔 도구를 부를 수도 있다.
-            if said and len(turn.dropped) > before and policy.retry_note and not retried:
-                retried = True
+            if (said and len(turn.dropped) > before and policy.retry_note
+                    and 강제한횟수 < 강제상한):
+                강제한횟수 += 1
                 # ★ **다시 묻기만 하면 또 안 부를 수 있다.** 그러면 "보낼게" 를
                 #   두 번 하고 두 번 안 온 것이 된다. 무엇이 걷혔는지 보고 그에
                 #   맞는 도구를 강제한다 — 이미 보낸다고 말한 자리라, 지어냈으면
