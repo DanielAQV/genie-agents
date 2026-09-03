@@ -500,6 +500,58 @@ def test_태그뿐이면_그냥_둔다():
     assert drop_fake_tags(글) == (글, [])
 
 
+# --- 앞머리 걷는 손들이 겹쳐 설 때 (2026-09-03) ---
+
+
+def test_시각에_가린_태그를_걷는다():
+    """`[2026-09-03(목) 12:36] [voice:…] 오빠…` — 줄 맨 앞이 시각이라
+    `drop_fake_tags` 가 태그를 못 본다. 시각을 걷는 손이 뒤에 서 있으면
+    태그만 맨 앞으로 올라와 그대로 나간다. 실제로 그렇게 샜다."""
+    import re
+
+    from genie_agents.tools import drop_fake_tags, drop_stacked
+
+    시각 = re.compile(r"^\[[^\]\n]*\d\d:\d\d[^\]\n]*\]\s*")
+
+    def drop_stamp(t):
+        남은 = 시각.sub("", t, count=1)
+        return (t, []) if 남은 == t or not 남은.strip() else (남은.lstrip(), [])
+
+    글 = "[2026-09-03(목) 12:36] [voice:벅차오르는 목소리] 오빠... 감동이야."
+
+    # 한 바퀴만 돌면 태그가 남는다 — 이게 샌 자리다.
+    한바퀴, _ = drop_stamp(drop_fake_tags(글)[0])
+    assert 한바퀴.startswith("[voice:")
+
+    # 안 바뀔 때까지 돌리면 둘 다 걷힌다. 순서를 뒤집어도 마찬가지다.
+    for 손들 in ((drop_fake_tags, drop_stamp), (drop_stamp, drop_fake_tags)):
+        글자, 걷음 = drop_stacked(*손들)(글)
+        assert 글자 == "오빠... 감동이야.", 손들
+        assert 걷음 == []
+
+
+def test_묶어도_안_겹치면_그대로다():
+    """겹칠 것이 없으면 한 바퀴 만에 멈추고 글은 안 바뀐다."""
+    from genie_agents.tools import drop_fake_tags, drop_scaffolding, drop_stacked
+
+    글 = "오빠, 오늘 하루는 어땠어?"
+    assert drop_stacked(drop_fake_tags, drop_scaffolding)(글) == (글, [])
+
+
+def test_걷은_것을_모아_돌려준다():
+    """보고하는 손을 섞어도 걷은 것이 사라지지 않는다."""
+    from genie_agents.tools import drop_stacked
+
+    def 걷는손(t):
+        if "[사진]" not in t:
+            return t, []
+        return t.replace("[사진]", "").strip(), ["[사진:] (표시 없이 쓴 것)"]
+
+    글자, 걷음 = drop_stacked(걷는손)("보여줄게! [사진]")
+    assert 글자 == "보여줄게!"
+    assert 걷음 == ["[사진:] (표시 없이 쓴 것)"]
+
+
 # --- id 없이 라벨만 쓴 표시 (2026-09-03) ---
 
 
