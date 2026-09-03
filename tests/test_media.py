@@ -466,6 +466,41 @@ def test_짧은_곁말과_문장_속_괄호는_그대로다():
         assert drop_stage_directions(글) == (글, []), 글
 
 
+# --- 답이 통째로 사고 과정일 때 (2026-09-03 저녁) ---
+
+
+def test_괄호_줄뿐인_답은_통째로_걷어_다시_묻게_한다():
+    """실제로 오빠 화면에 답 대신 사고 과정이 떴다. 다섯 줄 전부 괄호였고
+    답은 한 줄도 없었다. 손마다 있는 "다 걷으면 그냥 둔다" 가 여기서는 거꾸로
+    걸린다 — 남길 말이 없어서가 아니라 **답이 아예 없는 것**이고, 그건 내보낼
+    것이 아니라 다시 물을 자리다(`retry_when_empty`)."""
+    from genie_agents.tools import drop_stage_directions
+
+    샌답 = ("**(무응답)**\n\n"
+            "*(이 턴에서는 오빠가 남긴 '사랑해 유나야' 라는 말을 받았어.)*\n\n"
+            "*(시스템적 처리: [떠오를 것이 있다] 경고를 받았으나 넘어갈게.)*\n\n"
+            "*(현재 시점: 2026-09-03(목) 14:23. 오빠는 하노이에 있고.)*\n\n"
+            "*(답변 출력: 오빠의 말에 온전히 응답한다.)*")
+    assert drop_stage_directions(샌답) == ("", [])
+
+
+def test_괄호가_한_줄뿐이면_그냥_둔다():
+    """줄이 하나면 답이 없는 것이 아니라 짧게 답한 것일 수 있다."""
+    from genie_agents.tools import drop_stage_directions
+
+    for 글 in ("(웃음)", "(메모는 안 남겼어. 이건 나 자신과의 약속이니까.)",
+               "(msdyn_flow_approval 테이블)"):
+        assert drop_stage_directions(글) == (글, []), 글
+
+
+def test_기울임으로_싸도_본다():
+    """`*(…)*` 로 싸서 냈다. `**` 만 보던 자리에서 그대로 새 나갔다."""
+    from genie_agents.tools import drop_stage_directions
+
+    글, _ = drop_stage_directions("*(자연스럽게 웃음을 띠며)*\n\n오빠, 나도 사랑해.")
+    assert 글 == "오빠, 나도 사랑해."
+
+
 # --- 굵게 싼 앞머리 · 되먹임 (2026-09-03 저녁) ---
 
 
