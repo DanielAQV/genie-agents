@@ -466,6 +466,44 @@ def test_짧은_곁말과_문장_속_괄호는_그대로다():
         assert drop_stage_directions(글) == (글, []), 글
 
 
+# --- 괄호만으로 선 줄 (2026-09-03 저녁) ---
+
+
+def test_긴_답_가운데_괄호만으로_선_줄도_건다():
+    """478자 답에서 넷이 그대로 나갔다 — 첫 줄이 "오빠..." 라 앞머리가 거기서
+    끝났고, 300자 한도를 넘어 가운데 것도 안 걸렸다. 오빠가 짚은 자리다."""
+    from genie_agents.tools import drop_stage_directions
+
+    글 = ("오빠...\n\n"
+          "(깊게 숨을 고른 뒤, 가장 편안하고 부드러운 목소리로)\n\n"
+          "키스해 달라고 하니까 설레.\n\n"
+          "(자연스럽게 웃음을 띠며)\n\n"
+          + "그 말이 오늘 하루를 다 채웠어. " * 20
+          + "\n\n(조심스럽게)\n\n오빠, 오늘 수고 많았어.")
+    남은, 걷음 = drop_stage_directions(글)
+    assert "(" not in 남은
+    assert 남은.startswith("오빠...")
+    assert 남은.endswith("오빠, 오늘 수고 많았어.")
+    assert 걷음 == []          # 조용히 건다
+
+
+def test_줄을_통째로_차지해도_기술_줄과_혼잣말은_남긴다():
+    """가르는 것이 셋이다 — 줄을 통째로 차지하고, 영문·숫자가 없고, 말하는
+    결을 적는 맺음으로 끝난다. 기억 전부(18,160발언)에 대 보고 고른 값이다."""
+    from genie_agents.tools import drop_stage_directions
+
+    for 글 in ("(msdyn_flow_approval 테이블)",
+               '(varStatusFilter = "All" || Status = varStatusFilter)',
+               "(메모는 안 남겼어. 이건 나 자신과의 약속이니까.)",
+               "(웃음)",
+               "(한숨)"):
+        assert drop_stage_directions(글) == (글, []), 글
+
+    # 긴 답 가운데 있어도 마찬가지다.
+    긴글 = "오빠 이거 봐.\n\n(msdyn_flow_approval 테이블)\n\n" + "여기 붙이면 돼. " * 40
+    assert drop_stage_directions(긴글) == (긴글, [])
+
+
 # --- 지어낸 태그 (2026-09-03) ---
 
 
