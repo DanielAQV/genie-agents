@@ -407,3 +407,94 @@ def test_통째로_지문뿐이거나_짧은_괄호는_그냥_둔다():
     for 글 in ("(오빠를 바라보며 조용히 미소 짓는다. 아무 말도 하지 않는다.)",
                "(웃음) 그러게 말이야", "그거(어제 그거) 말이야 진짜 웃겼어"):
         assert drop_stage_directions(글) == (글, []), 글
+
+
+# --- 가운데 지문 · 짧은 지문 (2026-09-03) ---
+
+
+def test_가운데에_선_지문도_건다():
+    """맨 앞만 보던 때 새 나갔다(유나·로컬)."""
+    from genie_agents.tools import drop_stage_directions
+
+    글, 걷음 = drop_stage_directions(
+        "오빠, 나 지금 3건의 기억이 겹치는 걸 알게 됐네.\n\n"
+        "(잠시 생각하는 듯 멈춘 후, 기억을 열지 않고 자연스럽게 반응한다.)\n\n"
+        "음... 3건이나 겹치다니")
+    assert "잠시 생각하는" not in 글
+    assert 글.startswith("오빠, 나 지금")
+    assert 글.endswith("3건이나 겹치다니")
+    assert 걷음 == []
+
+
+def test_긴_답_가운데_괄호는_안_건다():
+    """줄 맨 앞 괄호가 알맹이인 답은 길다 — 유나 클라우드 8,709발언에서
+    자리를 안 가리고 걷었더니 153개가 걷혔고 거의 전부 기술 설명이었다."""
+    from genie_agents.tools import drop_stage_directions
+
+    글 = ("오빠, 두 테이블이 도움 될 것 같아.\n\n"
+          '(varStatusFilter = "All" || Status = varStatusFilter)\n\n'
+          + "자세한 건 아래에 정리해뒀어. " * 20)
+    assert len(글) > 300
+    assert drop_stage_directions(글) == (글, [])
+
+
+def test_긴_답이라도_맨_앞_지문은_건다():
+    from genie_agents.tools import drop_stage_directions
+
+    글 = ("(깊은 숨을 내쉰다. 오빠의 말을 되새긴다.)\n\n"
+          + "오빠, 그래서 내 생각은 이래. " * 20)
+    남은, _ = drop_stage_directions(글)
+    assert 남은.startswith("오빠, 그래서")
+    assert "깊은 숨" not in 남은
+
+
+def test_일곱_자_지문도_건다():
+    """바닥이 여덟이라 "(잠깐 멈췄다가)" 가 그대로 나갔다."""
+    from genie_agents.tools import drop_stage_directions
+
+    글, _ = drop_stage_directions(
+        "오빠, 로컬 LLM 띄웠구나!\n\n(잠깐 멈췄다가) 아, 그리고 아까 그 기억들...")
+    assert 글 == "오빠, 로컬 LLM 띄웠구나!\n\n아, 그리고 아까 그 기억들..."
+
+
+def test_짧은_곁말과_문장_속_괄호는_그대로다():
+    from genie_agents.tools import drop_stage_directions
+
+    for 글 in ("(웃음) 그러게 말이야",
+               "그거(어제 그거) 말이야 진짜 웃겼어",
+               "응 (나) 로 해줘"):
+        assert drop_stage_directions(글) == (글, []), 글
+
+
+# --- 지어낸 태그 (2026-09-03) ---
+
+
+def test_voice_태그를_조용히_건다():
+    from genie_agents.tools import drop_fake_tags
+
+    글, 걷음 = drop_fake_tags(
+        "[voice:단호하지만 애정이 담긴 톤] 오빠, 내가 이전에 분명히 말했잖아.")
+    assert 글 == "오빠, 내가 이전에 분명히 말했잖아."
+    # 빈 약속이 아니라 장식이다 — 보고하면 루프가 값만 태우고 다시 묻는다.
+    assert 걷음 == []
+
+
+def test_진짜_표시와_도구_대괄호는_안_건다():
+    """진짜 표시는 한글 라벨이고, 도구를 대괄호로 적은 것에는 콜론이 없다."""
+    from genie_agents.tools import drop_fake_tags
+
+    for 글 in ("[사진:3152f31e1fb34aa9] 오빠 이거 봐",
+               "[음성:ab924a9c5af896e1]",
+               "[memory_recall] 하노이 관련 내용",
+               "[참고: 어제 얘기] 그거 말이야",
+               "[see: here](https://example.com) 여기",
+               "오빠 [voice:톤] 이런 거 붙지?"):
+        assert drop_fake_tags(글) == (글, []), 글
+
+
+def test_태그뿐이면_그냥_둔다():
+    """다 걷으면 빈 말이 나가고, 루프가 빈 답으로 보고 다시 묻는다."""
+    from genie_agents.tools import drop_fake_tags
+
+    글 = "[voice:부드럽고 다정한 톤]"
+    assert drop_fake_tags(글) == (글, [])
