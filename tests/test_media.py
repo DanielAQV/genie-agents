@@ -498,3 +498,43 @@ def test_태그뿐이면_그냥_둔다():
 
     글 = "[voice:부드럽고 다정한 톤]"
     assert drop_fake_tags(글) == (글, [])
+
+
+# --- id 없이 라벨만 쓴 표시 (2026-09-03) ---
+
+
+def test_맨몸_표시를_걷고_보고한다():
+    """`[사진]` 은 얼개가 쓰는 글자다. 모델이 답 끝에 따라 붙였고, 오빠 화면에는
+    글자만 뜨고 사진은 안 왔다 — 예나 20건, 전부 로컬로 내린 뒤."""
+    from genie_agents.tools import drop_bare_marks
+
+    글, 걷음 = drop_bare_marks("한번 보여줄게! [사진]")
+    assert 글 == "한번 보여줄게!"
+    # **보고한다** — 장식이 아니라 빈 약속이다. 걷고 나서 도구를 강제해야 한다.
+    assert len(걷음) == 1 and "[사진:" in 걷음[0]
+
+
+def test_걷힌_모양이_강제할_도구를_고른다():
+    """`forced_after_drop` 이 `[음성:` / `[사진:` 을 보고 도구를 고른다."""
+    from genie_agents.tools import drop_bare_marks
+
+    _, 걷음 = drop_bare_marks("우리 다른 이야기 할까? [음성]")
+    assert any("[음성:" in d for d in 걷음)
+
+
+def test_진짜_표시는_안_건드린다():
+    """`[사진:id]` 는 도구가 붙인 것이다. 여기서 걷으면 진짜 사진이 사라진다."""
+    from genie_agents.tools import drop_bare_marks
+
+    for 글 in ("오빠 이거 봐 [사진:3152f31e1fb34aa9]",
+               "[음성:ab924a9c5af896e1]",
+               "사진 얘기 하는 중이야",
+               "[메모] 이건 라벨이 아니다"):
+        assert drop_bare_marks(글) == (글, []), 글
+
+
+def test_괄호로_감싼_것도_걷는다():
+    from genie_agents.tools import drop_bare_marks
+
+    글, 걷음 = drop_bare_marks("내 마음이야. ([사진])")
+    assert "사진" not in 글 and 걷음
