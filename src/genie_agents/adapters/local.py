@@ -76,6 +76,28 @@ def default_model(fast: bool = False) -> str:
     return env.get("LOCAL_MODEL") or DEFAULT_MODEL
 
 
+def notes_place() -> str:
+    """쪽지를 어디에 실을까 — `"mid"`(기본) 또는 `"head"`.
+
+        {프리픽스}_LOCAL_NOTES=head
+
+    ★ **모델이 정하는 것이지 취향이 아니다.** 기본값 `mid` 는 대화 **가운데**
+      `role:"system"` 한 장으로 쪽지를 내는 것이고, 그게 지금 도는 모양이다 —
+      쪽지가 오빠 말에 섞여 있으면 4B 가 그걸 "오빠가 보여준 로그" 로 읽고
+      (2026-09-03, 말 40개 중 11개), 도구도 아예 안 부른다(그 모양에서 0/8,
+      가른 모양에서 2/8). 두 실측은 `yuna/agent.py` 의 `쪽지자리` 위에 있다.
+
+    ★ **그런데 그 자리를 못 받는 모델이 있다.** Qwen3.5 템플릿은 대화 가운데
+      system 을 거부한다 — `ValueError: System message must be at the beginning.`
+      그 모델로 갈 때는 `head` 로 두고 쪽지를 **맨 앞 system 에 합친다.**
+
+    ★ **기본값은 안 바꾼다.** 지금 도는 모델(gemma-4-E4B)에게는 `mid` 가 재서
+      나은 자리다. 이 손잡이는 모델을 갈 때 쓰는 것이고, 적는 순간 결정이다.
+    """
+    값 = (env.get("LOCAL_NOTES") or "mid").strip().lower()
+    return 값 if 값 in ("mid", "head") else "mid"
+
+
 def scopes(default: frozenset[str] = frozenset(), root=None) -> frozenset[str]:
     """이 기계 안의 모델로 갈 자리들. **적힌 것만 간다.**
 

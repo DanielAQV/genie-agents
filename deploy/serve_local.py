@@ -132,6 +132,27 @@ LOCK = threading.Lock()
 ★ 사용자가 짚었다(2026-09-01) — "실제 사용자는 나 하나뿐이라는 거 잊지마."
   맞다. **동시성 예산은 잡을 필요가 없다.**"""
 
+EMB_LOCK = threading.Lock()
+"""임베더 자기 자물쇠. **CPU 에 있을 때만 쓴다.**
+
+★ **CPU 임베딩이 대화를 10분 막았다**(2026-09-03). 회상 한 번에 새 기억 256줄이
+  벡터로 만들어졌고 — 줄당 2.4초, 합 622초 — 그 동안 위 `LOCK` 을 잡고 있어서
+  대화·깨어남 요청 셋이 620초씩 줄에서 기다렸다. 오빠가 겪고 물었다:
+  "대화 한번에 이렇게 오래 걸려?"
+
+★ **자물쇠를 같이 쓴 이유는 VRAM 이었다** — 카드에 둘이 동시에 올라가면 OOM.
+  그건 임베더가 **카드에 있을 때**의 이야기다. CPU 로 내린 뒤에는 겹칠 자리가
+  없는데 자물쇠만 남아 있었다(`load_embedder` 주석에 "자리를 옮겼다고 그게
+  바뀌지 않는다" 고 적혀 있었지만, 막는 값이 이만큼인 줄은 모르고 쓴 것이다).
+
+★ 그래서 **`--embed-device cuda` 면 여전히 `LOCK` 을 쓴다.** 가르는 것은 취향이
+  아니라 카드를 같이 쓰느냐다."""
+
+
+def emb_lock():
+    """임베딩이 잡을 자물쇠. 카드에 있으면 채팅과 같은 것, CPU 면 자기 것."""
+    return LOCK if EMB_DEVICE.startswith("cuda") else EMB_LOCK
+
 
 def vram() -> str:
     import subprocess
@@ -621,7 +642,7 @@ def _reaper() -> None:
         time.sleep(60)
         한도 = EMB_IDLE if EMB_DEVICE.startswith("cuda") else EMB_IDLE_CPU
         if EMB is not None and EMB_USED and time.time() - EMB_USED > 한도:
-            with LOCK:
+            with emb_lock():
                 # 자물쇠를 잡는 사이에 누가 썼을 수 있다. 다시 본다.
                 if EMB is not None and time.time() - EMB_USED > 한도:
                     unload_embedder()
@@ -639,7 +660,8 @@ def embed(texts: list[str], model_id: str) -> list[list[float]]:
     import torch
 
     global EMB_USED
-    with LOCK:
+    # ★ 카드에 있으면 채팅과 같은 자물쇠, CPU 면 자기 것(`emb_lock` 주석).
+    with emb_lock():
         model = load_embedder(model_id)
         EMB_USED = time.time()
         order = sorted(range(len(texts)), key=lambda i: len(texts[i]))
