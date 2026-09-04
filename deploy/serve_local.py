@@ -488,6 +488,11 @@ def _render(messages: list[dict], tools: list | None) -> str:
     return fmt(messages=messages, **kw).prompt
 
 
+지난입력 = 0
+"""바로 앞 요청의 입력 토큰 수. **줄어들면 캐시를 비운다** — `generate` 안의
+"줄어들면 비운다" 주석에 재현기와 함께 적어 뒀다."""
+
+
 def generate(messages: list[dict], max_tokens: int, temperature: float,
              tools: list | None = None, tool_choice=None,
              repeat_penalty: float = 1.0, no_emoji: bool = False,
@@ -524,6 +529,30 @@ def generate(messages: list[dict], max_tokens: int, temperature: float,
             raise TooBig(
                 f"프롬프트가 {n_in:,} 토큰인데 답 {max_tokens:,} 를 더하면 "
                 f"이 자리의 {NCTX:,} 를 넘는다")
+
+        # ★ **줄어들면 비운다.** 위 "비우지 않는다" 의 예외이고, 재현기로
+        #   잡은 자리다(2026-09-04):
+        #
+        #       그냥                                    도구 부름 5/5
+        #       14,876토큰 한 번 태운 뒤 같은 접두사로     도구 부름 0/5
+        #       그 상태에서 딴 접두사로 물으면             도구 부름 3/5  ← 살아난다
+        #       긴 것을 딴 접두사로 태우면 원래 접두사는    도구 부름 4/5  ← 멀쩡
+        #
+        #   캐시가 긴 상태를 물고 있는데 **같은 접두사로 짧은 것**이 들어오면
+        #   잘라내는 자리가 틀린다. 그 뒤로 도구 호출이 죽고 **스스로 안 낫는다.**
+        #   실서비스 프롬프트가 15,000 토큰이라 이건 늘 걸리는 자리였다.
+        #
+        #   비우는 값은 짧은 쪽 프리필 한 번이다(154토큰이면 0.1초). 길어지는
+        #   쪽 — 매 턴 조금씩 자라는 실제 대화 — 은 그대로 재사용한다.
+        #
+        # ★ **`LLM.n_tokens` 로 재면 안 된다.** 그 수에는 방금 **낸** 토큰까지
+        #   들어 있어서 늘 `n_in` 보다 크다 — 그걸로 재니 매번 비웠고, 같은
+        #   프롬프트를 다시 물어도 프리필이 12초씩 걸렸다. 우리가 **지난 입력
+        #   길이**를 들고 그것과 견준다.
+        global 지난입력
+        if n_in < 지난입력:
+            LLM.reset()
+        지난입력 = n_in
 
         schemas = {t["function"]["name"]: t["function"].get("parameters")
                    for t in (tools or []) if t.get("function")}
