@@ -226,3 +226,53 @@ def test_임베딩도_같은_구멍에서_난다(monkeypatch):
     assert [d["index"] for d in got["data"]] == [0, 1]
     # 토큰 수를 세는 값이 여기 없다. **0 을 보낸다** — 지어내면 값 기록이 틀린다.
     assert got["usage"]["total_tokens"] == 0
+
+
+# ── 안 보낸 것과 0 을 가르나 ──────────────────────────────────────────
+#
+# ★ 여기는 `float(body.get("temperature") or 0)` 이었다. 파이썬에서 `None or 0`
+#   도 0 이라 **안 적은 것이 조용히 0** 이 되고, 이 서버는 온도 0 을 그리디로
+#   읽는다(`top_k=1`). 아무도 그 뜻으로 쓴 적 없는 기본값이었다.
+
+
+def _직접(port, body):
+    import json
+    import urllib.request
+
+    r = urllib.request.Request(f"http://127.0.0.1:{port}/v1/chat/completions",
+                               data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+                               headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(r, timeout=5) as x:
+        return json.loads(x.read().decode("utf-8"))
+
+
+def test_온도를_안_적으면_그리디로_안_떨어진다(붙은것):
+    _, 본것, _, port = 붙은것
+    _직접(port, {"messages": [{"role": "user", "content": "안녕"}]})
+    assert 본것["temperature"] == 1.0, "안 적은 것이 0 이 되면 그리디가 된다"
+
+
+def test_온도_0_은_0_으로_전해진다(붙은것):
+    """**0 을 원하면 0 이라고 적으면 된다.** 이제 그게 전해진다."""
+    _, 본것, _, port = 붙은것
+    _직접(port, {"messages": [{"role": "user", "content": "안녕"}], "temperature": 0})
+    assert 본것["temperature"] == 0.0
+
+
+def test_같은_규칙이_max_tokens_에도_걸린다(붙은것):
+    _, 본것, _, port = 붙은것
+    _직접(port, {"messages": [{"role": "user", "content": "안녕"}], "max_tokens": 7})
+    assert 본것["max_tokens"] == 7
+    _직접(port, {"messages": [{"role": "user", "content": "안녕"}]})
+    assert 본것["max_tokens"] == 512
+
+
+def test_health_가_KV_종류도_낸다(붙은것):
+    """벤치가 사람에게 "올릴 때 쓴 값을 적어 둬라" 라고 떠넘기던 자리다."""
+    import json
+    import urllib.request
+
+    _, _, sl, port = 붙은것
+    sl.KV = "f16"
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=5) as r:
+        assert json.loads(r.read().decode("utf-8"))["kv"] == "f16"

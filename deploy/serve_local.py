@@ -94,6 +94,12 @@ _cuda_path()
 LLM = None
 NAME = ""
 NCTX = 0
+KV = ""
+"""KV 를 무엇으로 잡고 올렸나. **`/health` 가 이걸 낸다.**
+
+★ 밖에서 알 길이 없어서 벤치가 사람에게 떠넘기고 있었다("KV 종류는 /health 가
+  안 알려준다 — 올릴 때 쓴 값을 적어 둬라"). 손으로 적는 값은 언젠가 틀리고,
+  틀린 채로 표에 남는다. 창 크기(`NCTX`)를 내는 것과 같은 이유로 낸다."""
 
 # 임베더는 따로 든다. **부를 때 올리고 안 쓰면 내린다.**
 #
@@ -182,9 +188,10 @@ def load(model_path: str, n_ctx: int, n_gpu_layers: int, kv_type: str):
     """
     from llama_cpp import Llama
 
-    global LLM, NAME, NCTX
+    global LLM, NAME, NCTX, KV
     NAME = os.path.basename(model_path)
     NCTX = n_ctx
+    KV = kv_type
     types = {"f16": 1, "q8_0": 8, "q4_0": 2}
     LLM = Llama(
         model_path=model_path,
@@ -488,6 +495,32 @@ def _render(messages: list[dict], tools: list | None) -> str:
     return fmt(messages=messages, **kw).prompt
 
 
+def _수(body: dict, 키: str, 기본):
+    """요청에서 숫자 하나. **안 보낸 것과 0 을 가른다.**
+
+    ★ 여기는 `float(body.get("temperature") or 0)` 이었다. 파이썬에서 `0 or 0`
+      은 0 이고 `None or 0` 도 0 이라, **안 적은 것이 조용히 0 이 된다.**
+      그리고 이 서버는 온도 0 을 "그리디로 가라" 로 읽는다(`top_k=1`).
+      곧 *온도를 안 적으면 그리디* 였다 — 적어 두고도 아무도 그 뜻으로
+      쓴 적이 없는 기본값이다. 골격 쪽에 "위험한 기본값" 으로 적혀만 있던
+      자리다(`coord/RUNTIME.md`).
+
+    ★ **기본값은 1.0 으로 둔다.** Gemma-4 권장값이고, 이 파일이 이미 온도가
+      0 이 아닐 때 같이 쓰는 값(`top_p=0.95` · `top_k=64`)이 그 권장 묶음이다.
+      0 을 원하면 **0 이라고 적으면 된다** — 이제 그게 전해진다.
+
+    ★ 같은 버그가 `max_tokens` 와 `repeat_penalty` 에도 있었다. 한 자리에서
+      고친다 — 규칙이 세 벌이면 그중 하나가 언젠가 낡는다.
+    """
+    값 = body.get(키)
+    if 값 is None:
+        return 기본
+    try:
+        return type(기본)(값)
+    except (TypeError, ValueError):
+        return 기본
+
+
 지난입력 = 0
 """바로 앞 요청의 입력 토큰 수. **줄어들면 캐시를 비운다** — `generate` 안의
 "줄어들면 비운다" 주석에 재현기와 함께 적어 뒀다."""
@@ -749,7 +782,7 @@ class Handler(BaseHTTPRequestHandler):
             #   여기서 다시 계산하면 그건 실측이 아니라 또 다른 짐작이다.
             찬것 = getattr(LLM, "n_tokens", None) if LLM is not None else None
             self._send(200, {
-                "status": "ok", "model": NAME, "n_ctx": NCTX,
+                "status": "ok", "model": NAME, "n_ctx": NCTX, "kv": KV,
                 "채움": 찬것,
                 "채움_%": (round(찬것 / NCTX * 100, 1) if (찬것 and NCTX) else 0),
                 "VRAM": vram(),
@@ -778,11 +811,11 @@ class Handler(BaseHTTPRequestHandler):
         try:
             got = generate(
                 body.get("messages") or [],
-                int(body.get("max_tokens") or 512),
-                float(body.get("temperature") or 0),
+                _수(body, "max_tokens", 512),
+                _수(body, "temperature", 1.0),
                 body.get("tools"),
                 body.get("tool_choice"),
-                float(body.get("repeat_penalty") or 1.0),
+                _수(body, "repeat_penalty", 1.0),
                 bool(body.get("no_emoji")),
                 # ★ **있을 때만, 이름으로 넘긴다.** 위치로 붙이면 이 자리를
                 #   통째로 흔내 내는 대역들이 전부 깨진다 — 안 쓰는 쪽은
