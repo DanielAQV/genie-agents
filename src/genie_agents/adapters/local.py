@@ -493,6 +493,14 @@ class _Messages:
             "no_emoji": bool(extra.get("no_emoji", True)),
             "stream": False,
         }
+        # ★ **문법(GBNF)을 실어 보낼 수 있다.** llama.cpp 문서가 도구 호출을
+        #   미덥게 만드는 표준 해법으로 드는 것이고, 서버가 그걸 받아 표집을
+        #   조인다(`serve_local.generate`). 고르는 자리(`core.router`)가
+        #   "이름 하나만" 이라는 문법을 줄 때 쓴다 — 그러면 4B 가 도구 호출
+        #   문법을 써낼 필요 없이 이름만 고르면 되고, 잘못된 이름이 나올 수가
+        #   없다. 재서 골랐다: 도구로 고르게 하면 14/24, 문법이면 18/24.
+        if extra.get("grammar"):
+            body["grammar"] = extra["grammar"]
         spec = _tools(tools)
         if spec:
             body["tools"] = spec

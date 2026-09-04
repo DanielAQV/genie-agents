@@ -107,16 +107,7 @@ EMB = None
 EMB_TOK = None
 EMB_NAME = ""
 EMB_USED = 0.0
-EMB_IDLE = 600.0   # 카드에 있을 때 이만큼 안 쓰면 내린다
-# ★ **CPU 에서도 내린다**(2026-09-03). 안 내리면 fp32 가중치 2.3GB 가 영영
-#   상주한다 — 실측으로 이 프로세스 Private 커밋 7.4GB 중 8~63MB 블록
-#   1,288MB + 잔여가 여기였다. 15.6GB 짜리 노트북에서 그 자리는 크다.
-#
-#   다만 **임계를 카드보다 훨씬 길게 잡는다.** 되찾을 VRAM 이 없으니 급할
-#   이유가 없고, 내리면 사용자가 재로딩 13.5초를 문다(`_reaper` 주석 참고).
-#   40분은 "오늘 이 대화는 끝났다" 에 가까운 값이라 그 13.5초가 회상 앞에
-#   붙는 일이 드물다 — 회상은 대화 중에 잦고, 대화 중에는 40분이 안 빈다.
-EMB_IDLE_CPU = 2400.0  # CPU 는 40분
+EMB_IDLE = 600.0   # 이만큼 안 쓰면 내린다
 EMB_MAXLEN = 2048  # 기억 한 줄 p99 가 2,800자 ≈ 1,600토큰. 여기까지 덮는다
 EMB_BUDGET = 6144  # 한 묶음의 토큰 상한
 EMB_DEFAULT = "BAAI/bge-m3"  # 다국어. 유나·예나 기억이 한국어라 여기가 갈린다
@@ -131,27 +122,6 @@ LOCK = threading.Lock()
 
 ★ 사용자가 짚었다(2026-09-01) — "실제 사용자는 나 하나뿐이라는 거 잊지마."
   맞다. **동시성 예산은 잡을 필요가 없다.**"""
-
-EMB_LOCK = threading.Lock()
-"""임베더 자기 자물쇠. **CPU 에 있을 때만 쓴다.**
-
-★ **CPU 임베딩이 대화를 10분 막았다**(2026-09-03). 회상 한 번에 새 기억 256줄이
-  벡터로 만들어졌고 — 줄당 2.4초, 합 622초 — 그 동안 위 `LOCK` 을 잡고 있어서
-  대화·깨어남 요청 셋이 620초씩 줄에서 기다렸다. 오빠가 겪고 물었다:
-  "대화 한번에 이렇게 오래 걸려?"
-
-★ **자물쇠를 같이 쓴 이유는 VRAM 이었다** — 카드에 둘이 동시에 올라가면 OOM.
-  그건 임베더가 **카드에 있을 때**의 이야기다. CPU 로 내린 뒤에는 겹칠 자리가
-  없는데 자물쇠만 남아 있었다(`load_embedder` 주석에 "자리를 옮겼다고 그게
-  바뀌지 않는다" 고 적혀 있었지만, 막는 값이 이만큼인 줄은 모르고 쓴 것이다).
-
-★ 그래서 **`--embed-device cuda` 면 여전히 `LOCK` 을 쓴다.** 가르는 것은 취향이
-  아니라 카드를 같이 쓰느냐다."""
-
-
-def emb_lock():
-    """임베딩이 잡을 자물쇠. 카드에 있으면 채팅과 같은 것, CPU 면 자기 것."""
-    return LOCK if EMB_DEVICE.startswith("cuda") else EMB_LOCK
 
 
 def vram() -> str:
@@ -490,8 +460,7 @@ def _render(messages: list[dict], tools: list | None) -> str:
 
 def generate(messages: list[dict], max_tokens: int, temperature: float,
              tools: list | None = None, tool_choice=None,
-             repeat_penalty: float = 1.0, no_emoji: bool = False,
-             grammar: str | None = None) -> dict:
+             repeat_penalty: float = 1.0, no_emoji: bool = False) -> dict:
     """한 번 만든다.
 
     ★ **`tool_choice` 로 하나를 못박으면 그 도구가 반드시 나온다.** 여기서
@@ -527,23 +496,10 @@ def generate(messages: list[dict], max_tokens: int, temperature: float,
 
         schemas = {t["function"]["name"]: t["function"].get("parameters")
                    for t in (tools or []) if t.get("function")}
-        # ★ **문법(GBNF)을 받으면 그걸로 표집을 조인다.** llama.cpp 문서가 도구
-        #   호출을 미덥게 만드는 표준 해법으로 드는 것이 이것이다 — 다만 그건
-        #   `tool_choice` 로 **하나를 못박았을 때**의 이야기고, "무엇을 부를지"
-        #   고르는 자리에는 안 걸린다.
-        #
-        #   그래서 여기를 연다. 고르는 쪽(`core.router`)이 "이름 하나만 내라" 는
-        #   문법을 직접 주면, 4B 가 도구 호출 문법을 써낼 필요 없이 **이름만**
-        #   고르면 된다. 잘못된 이름이 나올 수가 없다.
-        문법 = None
-        if grammar:
-            from llama_cpp import LlamaGrammar
-            문법 = LlamaGrammar.from_string(grammar, verbose=False)
         r = LLM.create_chat_completion(
             messages=messages,
             tools=tools or None,
             tool_choice=(tool_choice or "auto") if tools else None,
-            **({"grammar": 문법} if 문법 is not None else {}),
             max_tokens=max_tokens,
             # 온도 0 이면 표집을 좁힌다. 정해진 모양을 내는 자리라 다양성이
             # 값이 아니다. 0 이 아니면 Gemma-4 권장값으로 간다.
@@ -637,28 +593,23 @@ def unload_embedder() -> None:
 def _reaper() -> None:
     """안 쓰는 임베더를 내리는 실. 1분마다 본다.
 
-    ★ **어디에 있든 내리되, 임계가 다르다** — 카드 10분(`EMB_IDLE`),
-      CPU 40분(`EMB_IDLE_CPU`).
+    ★ **CPU 에 있으면 안 내린다.** 이 실이 있는 이유는 카드 자리를 되찾는
+      것이었는데, CPU 로 내린 뒤로는 되찾을 자리가 없다.
 
-      내리면 **사용자가 그 값을 문다.** 다시 올리는 데 13.5초고(실측), 그게
-      회상 한 번의 앞에 붙는다 — 회상은 오빠가 앞에서 기다리는 자리다. 그래서
-      한때 여기 "CPU 에 있으면 안 내린다" 고 적어 뒀었다.
+      그리고 내리면 **사용자가 그 값을 문다.** 다시 올리는 데 13.5초고(실측),
+      그게 회상 한 번의 앞에 붙는다 — 회상은 오빠가 앞에서 기다리는 자리다.
+      RAM 2.3GB 를 들고 있는 쪽이 싸다(이 노트북은 15.6GB 다).
 
-      그 판단을 재서 뒤집었다(2026-09-03). 이 프로세스가 Private 커밋 7.4GB 를
-      물고 있었고 그 중 임베더 몫이 fp32 로 2.3GB 였다. 15.6GB 짜리 노트북이
-      93% 까지 찼을 때 그 2.3GB 는 "싼 쪽" 이 아니었다.
-
-      **40분이 그 둘을 가른다.** 회상은 대화 중에 잦고, 대화 중에는 40분이
-      비지 않는다. 40분이 비었다는 것은 그 대화가 끝났다는 뜻이라, 무는 13.5초는
-      다음 대화의 첫 회상 한 번뿐이다.
+      처음에 여기 "놀리며 들고 있을 이유도 없다" 고 적었다가 로그에서 그
+      13.5초를 보고 고쳤다.
     """
     while True:
         time.sleep(60)
-        한도 = EMB_IDLE if EMB_DEVICE.startswith("cuda") else EMB_IDLE_CPU
-        if EMB is not None and EMB_USED and time.time() - EMB_USED > 한도:
-            with emb_lock():
-                # 자물쇠를 잡는 사이에 누가 썼을 수 있다. 다시 본다.
-                if EMB is not None and time.time() - EMB_USED > 한도:
+        if not EMB_DEVICE.startswith("cuda"):
+            continue
+        if EMB is not None and EMB_USED and time.time() - EMB_USED > EMB_IDLE:
+            with LOCK:
+                if EMB is not None and time.time() - EMB_USED > EMB_IDLE:
                     unload_embedder()
 
 
@@ -674,8 +625,7 @@ def embed(texts: list[str], model_id: str) -> list[list[float]]:
     import torch
 
     global EMB_USED
-    # ★ 카드에 있으면 채팅과 같은 자물쇠, CPU 면 자기 것(`emb_lock` 주석).
-    with emb_lock():
+    with LOCK:
         model = load_embedder(model_id)
         EMB_USED = time.time()
         order = sorted(range(len(texts)), key=lambda i: len(texts[i]))
@@ -755,10 +705,6 @@ class Handler(BaseHTTPRequestHandler):
                 body.get("tool_choice"),
                 float(body.get("repeat_penalty") or 1.0),
                 bool(body.get("no_emoji")),
-                # ★ **있을 때만, 이름으로 넘긴다.** 위치로 붙이면 이 자리를
-                #   통째로 흔내 내는 대역들이 전부 깨진다 — 안 쓰는 쪽은
-                #   예전 모양 그대로 도는 것이 이 통로를 여는 값이다.
-                **({"grammar": body["grammar"]} if body.get("grammar") else {}),
             )
         except TooBig as e:
             # ★ 413. 어댑터가 이걸 `LocalUnavailable` 로 올리고 부르는 쪽이
@@ -857,28 +803,10 @@ def main() -> int:
     #   어떻게 나올지 모르는 자리다. **모르는 자리를 얻자고 아는 자리를
     #   흔들지 않는다.**
     #
-    # ★ **위 표는 클라우드 시절 입력 크기로 고른 것이다** (2026-09-03에 다시 셈).
-    #   그때는 한 건에 6만~7.7만 토큰이 왔다 — 기억을 통째로 실어 보내던 자리다.
-    #   로컬은 작업 기억 예산이 따로 있어 그만큼 안 온다. 이 서버 로그
-    #   **요청 1,203건**을 다시 세면:
-    #
-    #       최대 프롬프트   19,140 토큰
-    #       상위 1%         18,338
-    #       중간값          10,479
-    #       24,576 초과          0 건
-    #
-    #   131,072 는 실제로 쓰는 것의 일곱 배였고, 안 쓰는 그 창이 전부 KV 로 나간다.
-    #
-    # ★ **그래서 32,768 이다** — 실측 최대의 1.7배. 넘으면 `TooBig` 으로 거절해
-    #   클라우드로 되돌아가고 그게 값이 되므로 여유는 넉넉히 둔다.
-    #
-    # ★ **남은 자리로 KV 를 f16 으로 올린다.** 그 전에는 못 했다 — 같은 카드에
-    #   그림 서버(~1.4GB)가 있었고 f16 이 131k 에서 +1,020 MiB 였다
-    #   (`coord/RUNTIME.md` ②). 창을 4분의 1로 줄이면 그 값도 4분의 1이 되고,
-    #   오빠가 그림 서버를 내리기로 했다(2026-09-03: "일단 그림은 내리자 말이
-    #   더 중요해"). 그 문서에 재 둔 것이 **f16 이 디코드 25% 빠르고 더 정확**이다.
-    p.add_argument("--n-ctx", type=int, default=32768)
-    p.add_argument("--kv", default="f16", choices=["f16", "q8_0", "q4_0"])
+    # ★ q8_0 이 f16 보다 낫다 — 같은 창에서 KV 가 절반이고, 남는 자리가
+    #   임베더 몫이 된다.
+    p.add_argument("--n-ctx", type=int, default=131072)
+    p.add_argument("--kv", default="q8_0", choices=["f16", "q8_0", "q4_0"])
     p.add_argument("--n-gpu-layers", type=int, default=-1, help="-1 = 전부 GPU")
     # ★ 임베더는 CPU 가 기본이다. 카드를 물면 채팅이 자리를 필요로 할 때마다
     #   내렸다 올려야 하고, 잃는 것은 회상 한 번에 0.05초뿐이다(load_embedder 참고).
