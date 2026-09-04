@@ -95,6 +95,7 @@ LLM = None
 NAME = ""
 NCTX = 0
 KV = ""
+LORA = ""     # 얹은 어댑터 파일 이름. 빈 값 = 본체 그대로
 """KV 를 무엇으로 잡고 올렸나. **`/health` 가 이걸 낸다.**
 
 ★ 밖에서 알 길이 없어서 벤치가 사람에게 떠넘기고 있었다("KV 종류는 /health 가
@@ -174,7 +175,8 @@ def vram() -> str:
         return "?"
 
 
-def load(model_path: str, n_ctx: int, n_gpu_layers: int, kv_type: str):
+def load(model_path: str, n_ctx: int, n_gpu_layers: int, kv_type: str,
+         lora_path: str = ""):
     """가중치를 한 번 올린다.
 
     ★ **`swa_full=False` 가 여기서 제일 중요한 한 줄이다.** Gemma 계열은 층
@@ -185,16 +187,24 @@ def load(model_path: str, n_ctx: int, n_gpu_layers: int, kv_type: str):
     ★ **`n_ctx` 는 미리 다 잡힌다.** 쓴 만큼이 아니다. 그래서 아래에서 자리를
       볼 때 재는 게 아니라 그냥 세면 된다 — transformers 때는 남은 VRAM 으로
       추정했고, 그 추정이 어텐션 행렬을 못 봐서 틀렸다.
+
+    ★ `lora_path` 는 **GGUF 로 바꾼 LoRA 어댑터**다(PEFT 폴더가 아니다 —
+      `llama.cpp/convert_lora_to_gguf.py` 를 거쳐야 한다). 얹으면 llama.cpp 가
+      mmap 을 끈다. 그래서 첫 올림이 느려지고 RAM 을 더 쓴다 — 그건 값이고,
+      어댑터를 안 넘기면 예전과 똑같이 돈다.
     """
     from llama_cpp import Llama
 
-    global LLM, NAME, NCTX, KV
+    global LLM, NAME, NCTX, KV, LORA
     NAME = os.path.basename(model_path)
     NCTX = n_ctx
     KV = kv_type
+    LORA = os.path.basename(lora_path) if lora_path else ""
     types = {"f16": 1, "q8_0": 8, "q4_0": 2}
+    더 = {"lora_path": lora_path} if lora_path else {}
     LLM = Llama(
         model_path=model_path,
+        **더,
         n_ctx=n_ctx,
         n_gpu_layers=n_gpu_layers,
         n_batch=512,
@@ -205,7 +215,7 @@ def load(model_path: str, n_ctx: int, n_gpu_layers: int, kv_type: str):
         swa_full=False,
         verbose=False,
     )
-    print(f"  올렸다 — {NAME} · ctx {n_ctx:,} · KV {kv_type} · VRAM {vram()}", flush=True)
+    print(f"  올렸다 — {NAME}{' + ' + LORA if LORA else ''} · ctx {n_ctx:,} · KV {kv_type} · VRAM {vram()}", flush=True)
     return LLM
 
 
@@ -794,7 +804,8 @@ class Handler(BaseHTTPRequestHandler):
             #   여기서 다시 계산하면 그건 실측이 아니라 또 다른 짐작이다.
             찬것 = getattr(LLM, "n_tokens", None) if LLM is not None else None
             self._send(200, {
-                "status": "ok", "model": NAME, "n_ctx": NCTX, "kv": KV,
+                "status": "ok", "model": NAME, "어댑터": LORA or None,
+                "n_ctx": NCTX, "kv": KV,
                 "채움": 찬것,
                 "채움_%": (round(찬것 / NCTX * 100, 1) if (찬것 and NCTX) else 0),
                 "VRAM": vram(),
@@ -954,6 +965,7 @@ def main() -> int:
     p.add_argument("--n-ctx", type=int, default=32768)
     p.add_argument("--kv", default="f16", choices=["f16", "q8_0", "q4_0"])
     p.add_argument("--n-gpu-layers", type=int, default=-1, help="-1 = 전부 GPU")
+    p.add_argument("--lora", default="", help="GGUF 로 바꾼 LoRA 어댑터 경로")
     # ★ 임베더는 CPU 가 기본이다. 카드를 물면 채팅이 자리를 필요로 할 때마다
     #   내렸다 올려야 하고, 잃는 것은 회상 한 번에 0.05초뿐이다(load_embedder 참고).
     p.add_argument("--embed-device", default="cpu", help="cpu | cuda")
@@ -965,7 +977,7 @@ def main() -> int:
         print(f"  가중치가 없다: {args.model}", file=sys.stderr)
         return 1
     print(f"  {os.path.basename(args.model)} — 올리는 중", flush=True)
-    load(args.model, args.n_ctx, args.n_gpu_layers, args.kv)
+    load(args.model, args.n_ctx, args.n_gpu_layers, args.kv, args.lora)
     print(f"  http://{args.host}:{args.port}/v1/chat/completions 에서 듣는다", flush=True)
     print(f"  http://{args.host}:{args.port}/v1/embeddings 도 같은 자리다 "
           f"({EMB_DEFAULT} · {EMB_DEVICE} — 부를 때 올린다)", flush=True)
