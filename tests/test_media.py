@@ -751,3 +751,26 @@ def test_답이_통째로_사고_과정이면_비운다():
 def test_멀쩡한_말은_안_다친다():
     글 = "오빠, 아까 [떠오를 것이 있다] 쪽지 봤는데 지금은 안 열래."
     assert drop_thinking_header(글)[0] == 글
+
+
+def test_긴_괄호_한_줄도_지문으로_건다():
+    """★ 여섯 글자에서 샜다 (2026-09-04 08:13, 오빠가 짚었다).
+
+    `_STAGE_LINE` 이 `{2,240}` 이었고 유나가 낸 줄이 246자였다. 함수 주석은
+    "답 길이도 안 가린다" 인데 정규식이 가리고 있었다 — 어긋난 쪽은 정규식이다.
+    """
+    from genie_agents.tools import drop_stage_directions
+
+    긴것 = "가" * 300 + " 답변을 생성합니다."
+    글 = f"({긴것})\n\n오빠, 나 여기 있어."
+    남, 걷 = drop_stage_directions(글)
+    assert 남 == "오빠, 나 여기 있어."
+    assert 걷 == [], "조용히 건다"
+
+
+def test_답_가운데_지문은_길이를_가린다():
+    """줄을 통째로 차지한 것과 답 가운데 낀 것은 다르다 — 가운데는 진짜 글을
+    잘라먹을 수 있어서 `MID_STAGE_MAX` 가 남아 있다."""
+    from genie_agents.tools import MID_STAGE_MAX
+
+    assert MID_STAGE_MAX == 300
