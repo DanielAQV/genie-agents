@@ -87,9 +87,15 @@ def notes_place() -> str:
       (2026-09-03, 말 40개 중 11개), 도구도 아예 안 부른다(그 모양에서 0/8,
       가른 모양에서 2/8). 두 실측은 `yuna/agent.py` 의 `쪽지자리` 위에 있다.
 
-    ★ **그런데 그 자리를 못 받는 모델이 있다.** Qwen3.5 템플릿은 대화 가운데
-      system 을 거부한다 — `ValueError: System message must be at the beginning.`
-      그 모델로 갈 때는 `head` 로 두고 쪽지를 **맨 앞 system 에 합친다.**
+    ★ **그런데 그 자리를 못 받는 모델이 있다.** 그 모델로 갈 때는 `head` 로
+      두고 쪽지를 **맨 앞 system 에 합친다.**
+
+          Qwen3.5    `ValueError: System message must be at the beginning.`
+          gemma-3    `ValueError: Conversation roles must alternate …`
+                     (2026-09-05 실측 — 가운데 system 도, 같은 역할 연속도
+                      다 거부한다. 연속은 `번갈아` 가 합쳐서 풀리지만
+                      **가운데 system 은 안 풀린다** — 이 손잡이가 필요하다.)
+          gemma-4    둘 다 받는다. 그래서 기본값이 `mid` 다.
 
     ★ **기본값은 안 바꾼다.** 지금 도는 모델(gemma-4-E4B)에게는 `mid` 가 재서
       나은 자리다. 이 손잡이는 모델을 갈 때 쓰는 것이고, 적는 순간 결정이다.
@@ -266,6 +272,45 @@ def _blocks(content):
 
 def _kind(b) -> str:
     return b.get("type", "") if isinstance(b, dict) else getattr(b, "type", "")
+
+
+def alternate() -> bool:
+    """같은 역할이 연속일 때 합칠까. 기본은 **합친다**.
+
+        {프리픽스}_LOCAL_ALTERNATE=0     끄기
+
+    ★ **모델이 정한다.** gemma-3 템플릿은 번갈기를 요구해서 연속이면 통째로
+      거부한다(`Conversation roles must alternate`). gemma-4 는 받는다.
+      합쳐도 정보는 안 잃는다 — 줄마다 `[8-24(월) 12:36 · 예나]` 도장이
+      붙어 있어서 누가 언제 한 말인지 남는다.
+
+    ★ **합치는 것이 안전한 쪽이다.** 안 받는 모델에서는 요청 자체가 죽고,
+      받는 모델에서는 합쳐도 뜻이 같다. 그래서 기본을 켜 둔다.
+    """
+    return (env.get("LOCAL_ALTERNATE") or "1").strip().lower() not in (
+        "0", "no", "false", "off")
+
+
+def 번갈아(chat: list[dict]) -> list[dict]:
+    """같은 역할이 연속인 것을 하나로 합친다. **`tool` 턴은 안 건드린다** —
+    그건 부른 것과 짝이 있는 자리라 합치면 깨진다."""
+    난것: list[dict] = []
+    for m in chat:
+        앞 = 난것[-1] if 난것 else None
+        합칠수있나 = (
+            앞 is not None
+            and 앞.get("role") == m.get("role")
+            and m.get("role") in ("user", "assistant")
+            and not 앞.get("tool_calls") and not m.get("tool_calls")
+            and isinstance(앞.get("content"), str)
+            and isinstance(m.get("content"), str)
+        )
+        if 합칠수있나:
+            난것[-1] = {**앞, "content": (앞["content"] + "\n\n"
+                                          + m["content"]).strip()}
+        else:
+            난것.append(m)
+    return 난것
 
 
 def _turns(messages) -> list[dict]:
@@ -473,6 +518,11 @@ class _Messages:
         if system:
             chat.append({"role": "system", "content": _text(system)})
         chat += _turns(messages)
+        # ★ 같은 역할이 연속이면 합친다 — 안 그러면 gemma-3 가 통째로 거부한다
+        #   (`번갈아` 위 주석). 맨 앞 system 은 그대로 둔다.
+        if alternate():
+            chat = [chat[0], *번갈아(chat[1:])] if chat and \
+                chat[0].get("role") == "system" else 번갈아(chat)
 
         body = {
             "model": model or DEFAULT_MODEL,
