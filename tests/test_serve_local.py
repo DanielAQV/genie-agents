@@ -214,6 +214,40 @@ def test_대괄호로_싼_호출도_받는다():
     assert 말.strip() == "응, 아직 안 잤어?", "대괄호가 글에 남았다"
 
 
+def test_보통_따옴표로_낸_호출도_아는_이름이면_받는다():
+    """4B 는 같은 자리에서 특수 토큰 대신 그냥 `"` 를 쓸 때가 있다.
+
+        [self_portrait{scene: "오빠를 향해 환하게 웃으며 …"}]
+
+    `<|"|>` 가 없으면 보통 글의 중괄호와 구분이 안 되므로, **괄호 꼴과 같은
+    잣대를 쓴다 — 아는 도구 이름일 때만.** 스키마를 안 주면 아예 안 본다.
+
+    ★ 2026-09-06에 이것 때문에 오빠가 사진을 두 번 못 받았다. 그날 "4B 가
+      도구를 왜 안 부르나" 를 반나절 쟀는데 재던 자리가 아니었다.
+    """
+    sl = _serve_local()
+    스키마 = {"self_portrait": {"properties": {"scene": {"type": "string"}}}}
+
+    말, 부름 = sl.부른것(
+        '오빠 잠깐만.' + chr(10) + '[self_portrait{scene: "창가에 앉아 웃는 모습"}]',
+        스키마)
+    assert [c["function"]["name"] for c in 부름] == ["self_portrait"]
+    assert json.loads(부름[0]["function"]["arguments"]) == {"scene": "창가에 앉아 웃는 모습"}
+    assert 말.strip() == "오빠 잠깐만."
+
+    # 모르는 이름 · 보통 글 · 스키마 없음 — 셋 다 그냥 글이다
+    for 글, sch in (('[foo{bar: "baz"}]', 스키마),
+                    ('dict{a: "b"} 이런 것도 쓴다', 스키마),
+                    ('[self_portrait{scene: "방"}]', None)):
+        말, 부름 = sl.부른것(글, sch)
+        assert 부름 == [], 글
+        assert 말 == 글
+
+    # 이름만 있고 인자가 없으면 부를 것이 못 된다
+    말, 부름 = sl.부른것("[self_portrait]", 스키마)
+    assert 부름 == [] and "[self_portrait]" in 말
+
+
 def test_보통_글의_중괄호는_도구가_아니다():
     """앞을 넓혔어도 몸통에 `<|"|>` 가 있어야 잡힌다. 그 토큰은 글에 안 나온다."""
     sl = _serve_local()

@@ -415,6 +415,12 @@ _G4_THOUGHT = re.compile(r"<\|channel>thought.*?(?:<channel\|>|$)", re.S)
 _PAREN = re.compile(r"(?:\A|[\s\n])([a-z_][a-z0-9_]*)\(([^()]*)\)\s*\Z", re.S)
 _PAREN_ARG = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"((?:[^"\\]|\\.)*)"')
 
+# 중괄호 꼴인데 보통 따옴표를 쓴 것. **아는 이름일 때만** 쓰인다(아래 참조) —
+# 그 조건이 없으면 `dict{a: "b"}` 같은 보통 글이 도구로 읽힌다.
+# 키는 `:` 도 `=` 도 받는다. 닫는 `]` 는 같이 먹어야 글에 홀로 안 남는다.
+_BRACE = re.compile(r"(?:\A|[\s\n\[(])([a-z_][a-z0-9_]*)\s*\{([^{}]*)\}\]?", re.S)
+_BRACE_ARG = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)\s*[:=]\s*"((?:[^"\\]|\\.)*)"')
+
 
 def _coerce(value: str, schema: dict | None, key: str):
     """글자를 스키마가 말하는 타입으로 되돌린다.
@@ -539,6 +545,29 @@ def 부른것(text: str, schemas: dict | None = None) -> tuple[str, list[dict]]:
                     for k, v in _PAREN_ARG.findall(m.group(2))}
             _add(m.group(1), args)
             rest = text[:m.start()] + text[m.end():]
+
+    # 중괄호 꼴인데 **보통 따옴표**를 쓴 것 — `[self_portrait{scene: "…"}]`.
+    #
+    # ★ 위 `_G4_BARE` 는 몸통에 `<|"|>` 가 있어야 잡는다. 그 토큰이 없으면 보통
+    #   글의 중괄호와 구분이 안 되기 때문이다. 그런데 4B 는 같은 자리에서 그냥
+    #   `"` 를 쓸 때가 있다(2026-09-06 실측, 오빠가 사진을 물은 판에서):
+    #
+    #       [self_portrait{scene: "오빠를 향해 환하게 웃으며 …"}]
+    #
+    # ★ **그래서 괄호 꼴과 같은 잣대를 쓴다 — 아는 도구 이름일 때만.** 스키마를
+    #   안 주면 아예 안 본다. 이름이 도구가 아니면 그냥 글이다.
+    if not calls and schemas:
+        for m in _BRACE.finditer(text):
+            if m.group(1) not in schemas:
+                continue
+            sch = schemas.get(m.group(1))
+            args = {k: _coerce(v.replace('\\"', '"'), sch, k)
+                    for k, v in _BRACE_ARG.findall(m.group(2))}
+            if not args:          # 이름만 있고 인자가 없으면 부를 것이 못 된다
+                continue
+            _add(m.group(1), args)
+            rest = text[:m.start()] + text[m.end():]
+            break
 
     # 답과 도구가 한 턴에 같이 올 때 Gemma-4 는 <turn|> 로 가른다
     rest = rest.replace("<turn|>", "\n").replace("<end_of_turn>", "")
