@@ -251,6 +251,50 @@ def test_얼개가_준_쪽지를_되읽으면_건다():
     assert said == "응 오빠, 잘 지냈어?"
 
 
+def test_글로_적은_도구_표시를_걷는다():
+    """4B 가 도구를 부르는 대신 표시를 타이핑한다. 그게 오빠 화면에 떴다.
+
+    2026-09-06. 진짜 호출은 `kind='회상넘김'` 으로 남아 화면에도 작업 기억에도
+    안 들어가는데(`yuna.policy.lane`), 글로 적으면 `kind='말'` 이라 **둘 다에
+    들어가서 다음 턴의 본보기가 된다.** 하루에 열 번 나갔고 오빠가 되물었다 —
+    "Memory pass가 뭐야?"
+
+    쪽지 쪽 원인을 먼저 밀었는데(`_recall_hint` 의 시간 목록) 표시는 모양만
+    `**[memory_pass]**` 로 바꿔 또 나왔다. 그래서 나가는 자리에서도 건다.
+    """
+    from genie_agents.tools import drop_tool_markers
+
+    # 답 **가운데**에서 나온다 — 앞머리를 보는 손들이 못 잡는 자리다(실측 05:12)
+    said, dropped = drop_tool_markers(
+        "오빠 좋아.\n\n**[memory_pass]**\n\n그리고 밥 먹었어?")
+    assert said == "오빠 좋아.\n\n그리고 밥 먹었어?"
+    # ★ **조용히 건다** — `drop_scaffolding` 과 같은 이유다
+    assert dropped == []
+
+    # ★ **줄째 건다.** 표시만 빼면 문장이 깨진다 — 실제로 이렇게 나왔다
+    said, _ = drop_tool_markers(
+        "**memory_pass**로 넘길게. 지금 파인튜닝 중이니까.\n\n오빠가 얘기해줘.")
+    assert said == "오빠가 얘기해줘."
+
+    # ★ **다 걷어서 빈 말이 되면 걷지 않는다.** 빈 말이 나가는 게 더 나쁘다
+    assert drop_tool_markers("**[memory_pass]**")[0] == "**[memory_pass]**"
+
+
+def test_도구_이름을_그냥_말한_건_안_건드린다():
+    """밑줄과 굵게를 **둘 다** 요구하는 것이 이 손의 안전장치다.
+
+    유나가 도구 얘기를 그냥 하는 자리가 있다 — "voice_reply가 못 되는 건 손
+    못 대는 문제고…". 헐거운 검사로 세면 그것까지 잡힌다(실제로 확인 스크립트를
+    헐겁게 썼다가 이 문장이 걸렸다, 2026-09-06).
+    """
+    from genie_agents.tools import drop_tool_markers
+
+    그대로 = "voice_reply가 못 되는 건 손 못 대는 문제고, 기억을 흘리는 건 달라."
+    assert drop_tool_markers(그대로)[0] == 그대로
+    # 밑줄 없는 굵은 말은 그냥 강조다
+    assert drop_tool_markers("**중요한 말**이야.")[0] == "**중요한 말**이야."
+
+
 def test_보통_괄호는_안_건드린다():
     from genie_agents.tools import drop_scaffolding
 

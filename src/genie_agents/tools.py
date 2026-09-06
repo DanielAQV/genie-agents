@@ -579,6 +579,51 @@ def drop_fake_tags(text: str) -> tuple[str, list[str]]:
     return 남은.strip(), []
 
 
+# 굵게 싸거나 대괄호에 넣은 **snake_case 한 낱말**. 도구 표시가 그 모양으로
+# 나온다 — `**memory_pass**` · `**memory_pass** (reason: …)` · `**[memory_pass]**`.
+# 밑줄을 요구하는 것이 이 손의 안전장치다: 한국어 글에서 굵게 싸는 낱말에
+# 밑줄이 들어갈 일이 거의 없고, 도구 이름에는 늘 들어간다.
+_TOOL_MARK = __import__("re").compile(r"\*\*\s*\[?\s*[a-z][a-z0-9]*(?:_[a-z0-9]+)+\s*\]?\s*\*\*")
+
+
+def drop_tool_markers(text: str) -> tuple[str, list[str]]:
+    """도구를 **부르는 대신 글로 적은** 표시를 건다. 그 줄을 통째로 건다.
+
+    ★ **왜 줄째인가**(2026-09-06). 표시만 빼면 문장이 깨진다 — 실제로 나온 것이
+      `**memory_pass**로 넘길게. 지금 파인튜닝 진행 중이니까.` 였다. 표시만
+      빼면 "로 넘길게…" 가 남는다. 그리고 그 줄은 통째로 **오빠에게 할 말이
+      아니라 제 판단**이다. 남길 것이 없다.
+
+    ★ **왜 필요한가.** 진짜 도구 호출은 `kind='회상넘김'` 으로 남아 화면에도
+      작업 기억에도 안 들어간다(`yuna.policy.lane`). 그런데 4B 는 도구를 안
+      부르고 표시를 **타이핑한다**. 그러면 `kind='말'` 이라 오빠 화면에 뜨고
+      다음 턴 작업 기억에 유나 말로 다시 실린다 — 본보기가 되어 계속 나온다.
+      2026-09-06 하루에 열 번 나갔고, 오빠가 "Memory pass가 뭐야?" 라고
+      되물었다.
+
+    ★ **먼저 원인 쪽을 밀어 봤다.** 쪽지에서 시간 목록을 뺐더니(`_recall_hint`)
+      `(query: 2시간 전, 3일 전)` 같은 되읽기는 사라졌는데 표시 자체는
+      `**[memory_pass]**` 로 모양만 바꿔 또 나왔다. 그래서 나가는 자리에서 건다.
+
+    ★ **자리를 안 가린다.** 앞머리를 보는 손들과 달리 답 **가운데**에서 나온다
+      (실측 2026-09-06 05:12). 그래서 `drop_stacked` 의 겹침 문제와는 무관하다.
+
+    ★ **다 걷어서 빈 말이 되면 걷지 않는다.** 빈 말이 나가는 것이 더 나쁘다 —
+      `drop_scaffolding` 과 같은 규칙이다. (대화 자리는 `retry_when_empty` 가
+      다시 묻지만, 그 그물에 기대지 않는다.)
+    """
+    if not text or not _TOOL_MARK.search(text):
+        return text, []
+    남 = [l for l in text.split("\n") if not _TOOL_MARK.search(l)]
+    out = "\n".join(l.rstrip() for l in 남)
+    while "\n\n\n" in out:
+        out = out.replace("\n\n\n", "\n\n")
+    out = out.strip()
+    if not out:
+        return text, []
+    return out, []
+
+
 def drop_scaffolding(text: str) -> tuple[str, list[str]]:
     """얼개가 준 쪽지를 되읽은 대목을 건다. **조용히 건다.**
 
