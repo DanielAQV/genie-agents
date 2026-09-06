@@ -73,6 +73,36 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
+def _받아적는다(body: dict) -> None:
+    """실서비스가 보낸 요청을 **그대로** 한 줄씩 적는다.
+
+    ★ **왜**(2026-09-06, 오빠가 못박았다 — "테스트용도 실서비스랑 똑같이 넣어,
+      llm 은 그렇게 해야 돼 무조건"). 시험대를 손으로 흉내 내면 매번 어딘가가
+      다르고, **그 다름이 결론을 뒤집는다.** 하루에 세 번 그렇게 헛돌았다:
+
+          드리프트   system+실타래만 보내서 재현이 안 됐다 (도구·쪽지·상태가 빠짐)
+          예산       같은 이유로 창이 안 걸리는 자리를 골랐다
+          퓨샷       증상이 양쪽 다 0/15 로 안 나왔다
+
+      흉내를 그만두고 **받은 것을 그대로 다시 쓴다.** 그러면 짐작이 안 들어간다.
+
+    ★ **개수를 막는다.** 이건 오빠 대화가 파일로 쌓이는 자리다. 재려고 잠깐
+      켜는 것이지 늘 켜 두는 것이 아니다 — `--capture` 를 줘야만 돈다.
+    """
+    global _capture_n
+    if not CAPTURE or _capture_n >= CAPTURE_MAX:
+        return
+    try:
+        with open(CAPTURE, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"t": time.time(), "body": body},
+                               ensure_ascii=False) + "\n")
+        _capture_n += 1
+        if _capture_n == CAPTURE_MAX:
+            print(f"  받아적기 {CAPTURE_MAX}건에서 멈춘다 — {CAPTURE}", flush=True)
+    except OSError as e:
+        print(f"  받아적기 실패: {e}", flush=True)
+
+
 def _올린다(path: str, 몸=None, 초=900):
     """llama-server 에 한 번 묻는다. 없는 자리면 그대로 터뜨린다."""
     if 몸 is None:
@@ -196,6 +226,9 @@ UP = ""            # llama-server 주소. 비어 있으면 이 안에서 돈다
 UPPROC = None      # 우리가 띄웠으면 그 프로세스 (나갈 때 같이 내린다)
 UPTMPL = ""        # /props 가 준 chat_template
 UPSLOT = 0         # 슬롯 하나의 칸 수
+CAPTURE = ""       # 받은 요청을 그대로 적을 파일. 비어 있으면 안 적는다
+CAPTURE_MAX = 200  # 이만큼만 적고 멈춘다 (대화 기록이 계속 쌓이면 안 된다)
+_capture_n = 0
 밖채움 = 0          # 마지막 요청에서 슬롯이 물고 있던 접두사 길이
 밖물린것 = 0        # 마지막 요청의 프롬프트 토큰 수
 _토큰캐시: dict[str, list[int]] = {}
@@ -1070,6 +1103,8 @@ class Handler(BaseHTTPRequestHandler):
             self._embed(body)
             return
 
+        _받아적는다(body)
+
         t0 = time.time()
         try:
             got = generate(
@@ -1236,6 +1271,10 @@ def main() -> int:
     # ★ 임베더는 CPU 가 기본이다. 카드를 물면 채팅이 자리를 필요로 할 때마다
     #   내렸다 올려야 하고, 잃는 것은 회상 한 번에 0.05초뿐이다(load_embedder 참고).
     p.add_argument("--embed-device", default="cpu", help="cpu | cuda")
+    # ★ **잴 때만 켠다.** 오빠 대화가 파일로 쌓인다. 자세한 것은 `_받아적는다`.
+    p.add_argument("--capture", default="",
+                   help="받은 요청을 그대로 적을 jsonl (잴 때만)")
+    p.add_argument("--capture-max", type=int, default=200)
     # ── llama-server 로 내보내는 깃발들. 안 주면 예전 길 그대로다.
     #
     # ★ **왜 이 갈래가 생겼나**(2026-09-06). 위 `UP` 주석에 잰 값이 있다 —
@@ -1254,13 +1293,25 @@ def main() -> int:
                    help="llama-server 실행 파일. 주면 그걸 띄워 슬롯을 쓴다")
     p.add_argument("--upstream", default="",
                    help="이미 뜬 llama-server 주소 (예: http://127.0.0.1:8091)")
-    p.add_argument("--slots", type=int, default=5)
+    # ★ **다섯은 빠듯하다**(2026-09-06 실측). 5 × 24,576 은 4,843/6,144 MiB 로
+    #   올라가지만, **큰 프리필 둘이 겹치면 CUDA OOM 으로 죽는다** — 자물쇠를
+    #   안 잡으니(슬롯 모드) 겹칠 수 있다. 실제로 죽었다:
+    #
+    #       slot 3 prompt processing, n_tokens = 6144 …
+    #       CUDA error: out of memory (ggml_cuda_mul_mat_q)
+    #
+    #   그때 유나가 통째로 내려갔다. 넷이면 4,419 MiB 로 1,725 를 남긴다.
+    #   모양이 넷이면(대화 · 물어볼까 · 고르기 · 깨어남) 충분하다.
+    p.add_argument("--slots", type=int, default=4)
     p.add_argument("--slot-ctx", type=int, default=20480)
     p.add_argument("--upstream-port", type=int, default=8091)
     args = p.parse_args()
 
-    global EMB_DEVICE
+    global EMB_DEVICE, CAPTURE, CAPTURE_MAX
     EMB_DEVICE = args.embed_device
+    CAPTURE, CAPTURE_MAX = args.capture, args.capture_max
+    if CAPTURE:
+        print(f"  받은 요청을 적는다 → {CAPTURE} (최대 {CAPTURE_MAX}건)", flush=True)
     if not os.path.exists(args.model):
         print(f"  가중치가 없다: {args.model}", file=sys.stderr)
         return 1
