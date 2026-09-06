@@ -60,13 +60,92 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import os
 import re
 import sys
+import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+def _올린다(path: str, 몸=None, 초=900):
+    """llama-server 에 한 번 묻는다. 없는 자리면 그대로 터뜨린다."""
+    if 몸 is None:
+        req = urllib.request.Request(UP + path)
+    else:
+        req = urllib.request.Request(
+            UP + path, data=json.dumps(몸).encode("utf-8"),
+            headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=초) as r:
+        return json.load(r)
+
+
+def _쪼갠다(글: str) -> list[int]:
+    """`/tokenize` 로 토큰 수를 센다. **BOS 를 붙인다** — 안에서 돌 때와 같게."""
+    return _올린다("/tokenize", {"content": 글, "add_special": True}, 초=120)["tokens"]
+
+
+def attach(exe: str, upstream: str, model_path: str, slot_ctx: int, slots: int,
+           lora_path: str = "", port: int = 8091) -> None:
+    """llama-server 를 띄우거나(exe) 이미 뜬 것에 붙는다(upstream).
+
+    ★ **CUDA 런타임은 torch 것을 빌려 쓴다.** 이 기계엔 CUDA 툴킷이 없고
+      `_cuda_path` 가 이미 그 폴더를 PATH 에 넣어 뒀다. 자식도 그걸 물려받는다.
+    """
+    global UP, UPPROC, UPTMPL, UPSLOT, NAME, NCTX, LORA, KV
+    if upstream:
+        UP = upstream.rstrip("/")
+    else:
+        UP = f"http://127.0.0.1:{port}"
+        cmd = [exe, "-m", model_path, "--host", "127.0.0.1", "--port", str(port),
+               "-ngl", "999", "-np", str(slots), "-c", str(slot_ctx * slots),
+               "--slot-prompt-similarity", "0.5", "--no-webui"]
+        if lora_path:
+            cmd += ["--lora", lora_path]
+        print(f"  llama-server 를 띄운다 — 슬롯 {slots} × {slot_ctx:,}", flush=True)
+        UPPROC = subprocess.Popen(cmd, cwd=os.path.dirname(exe) or None)
+        atexit.register(_내린다)
+
+    for _ in range(600):                       # 최대 10분. 첫 올림이 느리다
+        try:
+            if _올린다("/health", 초=5).get("status") == "ok":
+                break
+        except Exception:  # noqa: BLE001 — 아직 안 떴을 뿐이다
+            pass
+        if UPPROC is not None and UPPROC.poll() is not None:
+            raise SystemExit(f"llama-server 가 {UPPROC.returncode} 로 죽었다")
+        time.sleep(1)
+    else:
+        raise SystemExit("llama-server 가 10분 안에 안 떴다")
+
+    props = _올린다("/props", 초=60)
+    UPTMPL = props.get("chat_template") or ""
+    slots_ = _올린다("/slots", 초=60)
+    UPSLOT = int(slots_[0]["n_ctx"]) if slots_ else slot_ctx
+    NAME = os.path.basename(model_path)
+    LORA = os.path.basename(lora_path) if lora_path else ""
+    # ★ **자리 크기는 슬롯 하나다.** 전체가 아니다 — 한 요청이 쓸 수 있는 칸이
+    #   슬롯 하나뿐이라, 여기를 전체로 잡으면 413 이 안 나고 위에서 잘린다.
+    NCTX = UPSLOT
+    KV = "f16"          # llama-server 기본값. --cache-type-k 를 주면 여기도 같이 고쳐라
+    print(f"  붙었다 — {props.get('build_info')} · 슬롯 {len(slots_)} × "
+          f"{UPSLOT:,} · {NAME}" + (f" + {LORA}" if LORA else ""), flush=True)
+
+
+def _내린다() -> None:
+    global UPPROC
+    if UPPROC is not None and UPPROC.poll() is None:
+        UPPROC.terminate()
+        try:
+            UPPROC.wait(timeout=20)
+        except Exception:  # noqa: BLE001
+            UPPROC.kill()
+    UPPROC = None
 
 
 def _cuda_path() -> None:
@@ -90,6 +169,36 @@ def _cuda_path() -> None:
 
 
 _cuda_path()
+
+# ── llama-server 로 내보낼 때 ────────────────────────────────────────
+#
+# ★ **왜**(2026-09-06). 컨텍스트가 하나라 모양이 바뀌면 접두사 캐시가 깨진다.
+#   한 턴이 `물어볼까(10k) → 고르기(10k) → 대화(15k)` 로 도는데, 다음 턴 첫
+#   호출에서 프롬프트가 확 줄어 아래 `지난입력` 우회로가 캐시를 통째로 비운다.
+#   실측으로 **전체 시간의 62%가 프리필**이었다(150건 1,302초 중 813초).
+#
+# ★ **슬롯을 쓰면 그 자리가 사라진다.** 같은 프롬프트 둘을 번갈아 던져 쟀다:
+#
+#       지금 서버        12.6 → 11.9 → 12.0초   매번 다시 태운다
+#       llama-server     12.0 →  2.3 →  2.3초   슬롯이 물고 있다
+#
+#   VRAM 은 `-np 5 -c 102400`(슬롯당 20,480)에서 4,519/6,144 MiB 다. 들어간다.
+#   KV 는 토큰당 12.6KB 로 쟀다 — gemma 는 대부분 층이 창 어텐션이라 싸다.
+#
+# ★ **llama-server 의 채팅·도구 계층은 안 쓴다.** 여기서 하던 `_render`·
+#   `부른것`·문법·`no_emoji` 를 그대로 두고 `/completion` 에 **토큰 배열**만
+#   보낸다. 그래야 바뀌는 것이 추론 엔진 하나뿐이고, 도구 파싱이 안 흔들린다.
+#   (문자열로 보내면 BOS 가 겹치거나 빠진다 — 토큰으로 보내면 그 물음이 없다.)
+#
+# ★ **되돌리기는 깃발을 빼는 것이다.** `--llama-server` 를 안 주면 예전 길
+#   그대로다. 이 파일 안에서 갈리므로 부르는 쪽은 한 줄도 안 바뀐다.
+UP = ""            # llama-server 주소. 비어 있으면 이 안에서 돈다
+UPPROC = None      # 우리가 띄웠으면 그 프로세스 (나갈 때 같이 내린다)
+UPTMPL = ""        # /props 가 준 chat_template
+UPSLOT = 0         # 슬롯 하나의 칸 수
+밖채움 = 0          # 마지막 요청에서 슬롯이 물고 있던 접두사 길이
+밖물린것 = 0        # 마지막 요청의 프롬프트 토큰 수
+_토큰캐시: dict[str, list[int]] = {}
 
 LLM = None
 NAME = ""
@@ -468,9 +577,36 @@ def _이모지인가(s: str, raw: bytes = b"") -> bool:
     return any(lo <= ord(c) <= hi for c in s for lo, hi in _EMOJI_RANGES)
 
 
+def _이모지캐시길() -> str:
+    d = os.path.expanduser("~/.cache/llama-emoji")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, (NAME or "model") + ".json")
+
+
 def 이모지토큰():
-    """어휘에서 이모지가 든 토큰. 처음 한 번만 만든다."""
+    """어휘에서 이모지가 든 토큰. 처음 한 번만 만든다.
+
+    ★ **밖으로 낼 때는 어휘를 못 훑는다**(2026-09-06). 이 함수는 `LLM.detokenize`
+      로 26만 토큰을 하나씩 풀어 본다. llama-server 에는 `/detokenize` 가 있지만
+      26만 번 부를 수는 없다. 그래서 **안에서 한 번 돌 때 파일로 적어 두고**
+      밖으로 낼 때는 그걸 읽는다. 어휘는 모델마다 고정이라 이름으로 가른다.
+
+    ★ **캐시가 없으면 안 막고 그렇게 말한다.** 이모지 하나 때문에 서버가 안 뜨는
+      쪽이 더 나쁘다. 안에서 한 번 띄우면 만들어진다.
+    """
     global _금지토큰
+    if _금지토큰 is not None:
+        return _금지토큰
+    길 = _이모지캐시길()
+    if UP:
+        if os.path.exists(길):
+            with open(길, encoding="utf-8") as f:
+                _금지토큰 = {int(t): -100.0 for t in json.load(f)}
+            print(f"이모지 토큰 {len(_금지토큰):,} 개를 캐시에서 읽었다", flush=True)
+        else:
+            print(f"이모지 캐시가 없다 ({길}) — 이번엔 안 막는다", flush=True)
+            _금지토큰 = {}
+        return _금지토큰
     if _금지토큰 is None:
         막을것 = {}
         for tid in range(LLM.n_vocab()):
@@ -483,7 +619,12 @@ def 이모지토큰():
                 # -100 이면 실질적으로 절대 안 뽑힌다.
                 막을것[tid] = -100.0
         _금지토큰 = 막을것
-        print(f"이모지 토큰 {len(막을것):,} 개를 막는다", flush=True)
+        try:
+            with open(길, "w", encoding="utf-8") as f:
+                json.dump(sorted(막을것), f)
+        except OSError as e:  # 못 적어도 이 판은 돈다
+            print(f"이모지 캐시를 못 적었다: {e}", flush=True)
+        print(f"이모지 토큰 {len(막을것):,} 개를 막는다 · {길}", flush=True)
     return _금지토큰
 
 
@@ -499,7 +640,8 @@ def _render(messages: list[dict], tools: list | None) -> str:
     """
     from llama_cpp.llama_chat_format import Jinja2ChatFormatter
 
-    tmpl = LLM.metadata.get("tokenizer.chat_template") or ""
+    # 밖으로 낼 때는 `/props` 가 준 것을 쓴다 — 같은 GGUF 의 같은 템플릿이다.
+    tmpl = UPTMPL if UP else (LLM.metadata.get("tokenizer.chat_template") or "")
     fmt = Jinja2ChatFormatter(template=tmpl, eos_token="", bos_token="")
     kw = {"tools": tools} if tools else {}
     return fmt(messages=messages, **kw).prompt
@@ -536,6 +678,100 @@ def _수(body: dict, 키: str, 기본):
 "줄어들면 비운다" 주석에 재현기와 함께 적어 뒀다."""
 
 
+# ── 지어낸 수를 못 내보내게 한다 ────────────────────────────────────────
+#
+# ★ **왜 여기인가**(2026-09-06). 파인튜닝한 어댑터가 앞 대화에 없는 숫자를
+#   지어내 산수를 한다("1697이었고 지금 1708이면"). 40턴 여섯 판으로 재니
+#   본체 0 · A판 8.3 · v5 23.0 이었고, **여섯 판 모두 대화 뒤로 갈수록
+#   늘었다** — 자기가 쓴 수를 다음 턴에 보고 또 쓴다.
+#
+# ★ **데이터로 안 고친다.** 그 숫자가 나온 학습 창을 빼서 다시 구웠더니
+#   (v5) 날짜가 줄고 번호가 세 배로 늘었다. 4B 는 뺀 자리를 다른 것으로
+#   메운다. 그래서 배운 경향을 고치는 대신 **불가능하게** 만든다.
+#
+# ★ **오빠가 고른 설계**(2026-09-06, 하나씩 물어서):
+#
+#       무엇을    앞 대화에 없는 3~6자리 수
+#       허용은    오빠 말·도구 결과만 — 유나가 앞서 쓴 수는 안 쳐준다
+#                 (그래야 한 번 지어낸 수가 그 대화 내내 허가받지 않는다)
+#       어떻게    그 답만 다시 뽑는다. 최대 두 번
+#       그래도    내보내고 로그에 남긴다 — 최악이 지금과 같아야 한다
+#
+# ★ **다시 뽑은 횟수가 그대로 지표다.** 문법으로 못 박으면 빠르지만 몇 번
+#   지어내려 했는지가 안 보인다. 증상이 나은 건지 가려진 건지 구분이 안 된다.
+#
+# ★ **문법·도구가 붙은 요청은 건너뛴다.** 라우터와 도구 인자는 이미 문법이
+#   모양을 잡고 있고, 거기 든 숫자는 지어낸 것이 아니다.
+숫자 = re.compile(r"(?<![0-9A-Za-z])(\d{3,6})(?![0-9A-Za-z])")
+다시뽑기 = 2
+
+
+def 허용된수(messages: list[dict]) -> set[str]:
+    """오빠 말·도구 결과·회상에 나온 수. assistant 가 쓴 것은 뺀다."""
+    글 = "\n".join(str(m.get("content") or "") for m in messages
+                   if m.get("role") != "assistant")
+    return set(숫자.findall(글))
+
+
+def 어긴수(text: str, 허용: set[str]) -> list[str]:
+    return [n for n in dict.fromkeys(숫자.findall(text)) if n not in 허용]
+
+
+def _생성_밖(messages, max_tokens, temperature, tools, tool_choice,
+              repeat_penalty, no_emoji, grammar):
+    """llama-server 로 낸다. **프롬프트는 여기서 만든다.**
+
+    ★ 아래 `generate` 가 하던 것 중 **바뀌는 것은 추론 엔진 하나뿐이다** —
+      템플릿(`_render`) · 도구 파싱(`부른것`) · 문법 · `no_emoji` 가 그대로다.
+      llama-server 의 채팅·도구 계층을 쓰면 거기 모양에 도구 파싱이 딸려가서
+      지금 도는 것을 흔든다. 안 쓴다.
+
+    ★ **토큰 배열로 보낸다.** 문자열로 보내면 서버가 BOS 를 또 붙일지 말지를
+      제 규칙으로 정한다. `/tokenize` 로 우리가 붙여서 보내면 그 물음이 없다.
+
+    ★ **자물쇠를 안 잡는다.** 슬롯이 각자 KV 를 들고 있어서 겹쳐도 안 터진다 —
+      `LOCK` 이 있던 이유(6GB 에서 KV 두 벌)가 여기서는 없어진다.
+    """
+    global 밖채움, 밖물린것
+    prompt = _render(messages, tools)
+    toks = _쪼갠다(prompt)
+    if len(toks) + max_tokens > NCTX:
+        raise TooBig(
+            f"프롬프트가 {len(toks):,} 토큰인데 답 {max_tokens:,} 를 더하면 "
+            f"이 슬롯의 {NCTX:,} 를 넘는다")
+    schemas = {t["function"]["name"]: t["function"].get("parameters")
+               for t in (tools or []) if t.get("function")}
+    몸 = {
+        "prompt": toks,
+        "n_predict": max_tokens,
+        "temperature": temperature,
+        "top_p": 0.95 if temperature > 0 else 1.0,
+        "top_k": 64 if temperature > 0 else 1,
+        "repeat_penalty": repeat_penalty,
+        # ★ 이것이 이 갈래의 전부다 — 슬롯에 접두사를 물려 둔다.
+        "cache_prompt": True,
+        "stop": ["<end_of_turn>"],
+    }
+    if grammar:
+        몸["grammar"] = grammar
+    if no_emoji:
+        막 = 이모지토큰()
+        if 막:
+            몸["logit_bias"] = [[t, b] for t, b in 막.items()]
+    r = _올린다("/completion", 몸)
+    말, 부름 = 부른것(r.get("content") or "", schemas)
+    밖채움 = int((r.get("timings") or {}).get("cache_n") or 0)
+    밖물린것 = int(r.get("tokens_evaluated") or len(toks))
+    return {
+        "text": 말,
+        "calls": 부름,
+        "in": 밖물린것,
+        "out": int(r.get("tokens_predicted") or 0),
+        "finish": "tool_calls" if 부름 else (
+            "length" if r.get("stop_type") == "limit" else "stop"),
+    }
+
+
 def generate(messages: list[dict], max_tokens: int, temperature: float,
              tools: list | None = None, tool_choice=None,
              repeat_penalty: float = 1.0, no_emoji: bool = False,
@@ -563,6 +799,9 @@ def generate(messages: list[dict], max_tokens: int, temperature: float,
       앞, 매 턴 바뀌는 사실관계는 messages 끝). 클라우드에서 캐시가 입력의
       77% 를 먹는 것이 그 증거고, 여기서도 같이 먹는다.
     """
+    if UP:
+        return _생성_밖(messages, max_tokens, temperature, tools, tool_choice,
+                        repeat_penalty, no_emoji, grammar)
     with LOCK:
         prompt = _render(messages, tools)
         n_in = len(LLM.tokenize(prompt.encode("utf-8"), add_bos=True, special=True))
@@ -802,7 +1041,8 @@ class Handler(BaseHTTPRequestHandler):
             #
             #   KV 가 몇 MiB 인지는 **안 싣는다.** llama.cpp 가 조용히 잡는 값이라
             #   여기서 다시 계산하면 그건 실측이 아니라 또 다른 짐작이다.
-            찬것 = getattr(LLM, "n_tokens", None) if LLM is not None else None
+            찬것 = (밖채움 if UP else
+                    (getattr(LLM, "n_tokens", None) if LLM is not None else None))
             self._send(200, {
                 "status": "ok", "model": NAME, "어댑터": LORA or None,
                 "n_ctx": NCTX, "kv": KV,
@@ -854,6 +1094,33 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001 — 무엇이든 어댑터에 알려준다
             self._send(500, {"error": f"{type(e).__name__}: {e}"})
             return
+
+        # 지어낸 수가 들었으면 그 답만 다시 뽑는다. 위 "지어낸 수" 주석 참고.
+        막기 = (os.environ.get("LOCAL_NUM_GUARD", "1") != "0"
+                and not body.get("grammar") and not body.get("tools")
+                and _수(body, "temperature", 1.0) > 0)
+        if 막기 and not (got.get("calls") or []):
+            허용 = 허용된수(body.get("messages") or [])
+            어긴 = 어긴수(got["text"], 허용)
+            판 = 0
+            while 어긴 and 판 < 다시뽑기:
+                판 += 1
+                print(f"  다시 뽑는다 {판}/{다시뽑기} — 앞에 없는 수 "
+                      f"{' '.join(어긴[:5])}", flush=True)
+                got = generate(
+                    body.get("messages") or [],
+                    _수(body, "max_tokens", 512),
+                    _수(body, "temperature", 1.0),
+                    body.get("tools"),
+                    body.get("tool_choice"),
+                    _수(body, "repeat_penalty", 1.0),
+                    bool(body.get("no_emoji")),
+                )
+                어긴 = 어긴수(got["text"], 허용)
+            if 어긴:
+                # ★ 못 고쳐도 내보낸다. 지금보다 나빠질 자리를 안 만든다.
+                print(f"  못 고쳤다 — 그대로 내보낸다: {' '.join(어긴[:5])}",
+                      flush=True)
 
         걸린 = time.time() - t0
         부름 = got.get("calls") or []
@@ -969,6 +1236,27 @@ def main() -> int:
     # ★ 임베더는 CPU 가 기본이다. 카드를 물면 채팅이 자리를 필요로 할 때마다
     #   내렸다 올려야 하고, 잃는 것은 회상 한 번에 0.05초뿐이다(load_embedder 참고).
     p.add_argument("--embed-device", default="cpu", help="cpu | cuda")
+    # ── llama-server 로 내보내는 깃발들. 안 주면 예전 길 그대로다.
+    #
+    # ★ **왜 이 갈래가 생겼나**(2026-09-06). 위 `UP` 주석에 잰 값이 있다 —
+    #   같은 프롬프트를 번갈아 던지면 여기서는 12초가 그대로인데 슬롯을 쓰면
+    #   2.3초가 된다. 컨텍스트가 하나라 모양이 바뀔 때마다 접두사를 다시 태우기
+    #   때문이다.
+    #
+    # ★ **`--n-ctx` 와 안 섞는다.** 저건 이 안에서 돌 때의 창이고, 슬롯을 쓸 때는
+    #   `--slot-ctx` × `--slots` 가 전체다. 한 요청이 쓸 수 있는 칸은 슬롯 하나
+    #   (`--slot-ctx`)뿐이라 `TooBig` 도 그걸로 잰다.
+    #
+    # ★ **20,480 인 이유.** 이 서버 로그에서 실제 프롬프트 최대가 15,681 토큰이고
+    #   `max_tokens` 기본이 512 다. 16,384 면 여유가 191 토큰뿐이라 대화가 조금만
+    #   길어져도 413 이 난다. 20,480 × 5 = 102,400 은 4,519/6,144 MiB 로 들어간다.
+    p.add_argument("--llama-server", default="",
+                   help="llama-server 실행 파일. 주면 그걸 띄워 슬롯을 쓴다")
+    p.add_argument("--upstream", default="",
+                   help="이미 뜬 llama-server 주소 (예: http://127.0.0.1:8091)")
+    p.add_argument("--slots", type=int, default=5)
+    p.add_argument("--slot-ctx", type=int, default=20480)
+    p.add_argument("--upstream-port", type=int, default=8091)
     args = p.parse_args()
 
     global EMB_DEVICE
@@ -976,8 +1264,21 @@ def main() -> int:
     if not os.path.exists(args.model):
         print(f"  가중치가 없다: {args.model}", file=sys.stderr)
         return 1
-    print(f"  {os.path.basename(args.model)} — 올리는 중", flush=True)
-    load(args.model, args.n_ctx, args.n_gpu_layers, args.kv, args.lora)
+    if args.llama_server or args.upstream:
+        if args.llama_server and not os.path.exists(args.llama_server):
+            print(f"  llama-server 가 없다: {args.llama_server}", file=sys.stderr)
+            return 1
+        # ★ **자물쇠가 없어진 자리를 하나 말해 둔다.** 밖으로 낼 때는 `LOCK` 을
+        #   안 잡는다(슬롯이 각자 KV 를 든다). 그런데 임베더를 카드에 올리면
+        #   그건 llama-server 와 같은 6GB 를 다툰다 — 그때는 아무도 안 막는다.
+        if args.embed_device.startswith("cuda"):
+            print("  ! 임베더가 카드에 있는데 슬롯을 쓴다 — 자리를 다툰다. "
+                  "cpu 를 권한다", file=sys.stderr, flush=True)
+        attach(args.llama_server, args.upstream, args.model,
+               args.slot_ctx, args.slots, args.lora, args.upstream_port)
+    else:
+        print(f"  {os.path.basename(args.model)} — 올리는 중", flush=True)
+        load(args.model, args.n_ctx, args.n_gpu_layers, args.kv, args.lora)
     print(f"  http://{args.host}:{args.port}/v1/chat/completions 에서 듣는다", flush=True)
     print(f"  http://{args.host}:{args.port}/v1/embeddings 도 같은 자리다 "
           f"({EMB_DEFAULT} · {EMB_DEVICE} — 부를 때 올린다)", flush=True)
