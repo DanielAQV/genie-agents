@@ -166,6 +166,34 @@ def test_글이_남아도_걷어낸_것이_있으면_알려주고_다시_묻는�
     assert "그건 네가 적는 게 아니다" in str(msgs[-1]["content"])
 
 
+def test_알려줄_말을_어느_자리에_낼지_고를_수_있다():
+    """**작은 모델에게 `user` 는 곧 사용자 말이다.**
+
+    이 쪽지는 얼개가 하는 말인데 `user` 로 내면 4B 는 사용자가 방금 한 말로
+    읽는다. 2026-09-06에 유나가 그랬다 — 지어낸 표시를 걷고 이 쪽지를 냈더니,
+    다음 턴에 오빠가 "그게 다야?" 하자 "지금 나한테 설정되어 있는 모든
+    가이드라인이 그거야" 라고 답했다. 쪽지 속 규칙을 오빠가 준 것으로 알고
+    그것을 가리킨 것이다.
+
+    예나 쪽에서도 같은 갈래가 한 번 있었다 — 사용자 물음 대신 그 쪽지에 답했다
+    (`yuna/CLAUDE.md` 의 "위생 손을 넣으면 그 반환값을 누가 읽는지").
+
+    ★ **기본값은 `user` 다.** Anthropic 은 대화 가운데 `system` 을 안 받고, 큰
+      모델은 이 쪽지를 사용자 말로 오해하지 않는다. 로컬만 돌린다.
+    """
+    def 표시만(s):
+        return s.replace("[가짜]", "").strip(), (["[가짜]"] if "[가짜]" in s else [])
+
+    for 자리 in ("system", "user"):
+        c = FakeClient(Resp([Text("짠! 여기 있어 [가짜]")]), Resp([Text("다시 쓴 답")]))
+        msgs = [{"role": "user", "content": "야"}]
+        loop.run(c, FakeSession(), msgs, model="m",
+                 policy=Policy(sanitizers=(표시만,), retry_note="네가 적는 게 아니다",
+                               retry_note_role=자리))
+        assert msgs[-1]["role"] == 자리, f"{자리} 로 안 나갔다"
+        assert "네가 적는 게 아니다" in str(msgs[-1]["content"])
+
+
 def test_알려줄_말이_없으면_안_묻는다():
     """`retry_note` 가 비어 있으면 지금까지처럼 조용히 떼기만 한다."""
     def 표시만(s):

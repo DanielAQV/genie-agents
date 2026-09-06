@@ -296,7 +296,11 @@ def run(
                 print("  (걷어낸 이유를 알려주고 한 번 다시 묻는다"
                       + (f" — {force} 를 강제한다)" if force else ")"), file=sys.stderr)
                 messages.append({"role": "assistant", "content": response.content})
-                messages.append({"role": "user", "content": policy.retry_note})
+                # ★ **자리를 정책이 정한다**(`retry_note_role`). 작은 모델에게
+                #   `user` 는 곧 사용자 말이라, 이 쪽지의 규칙들을 사용자가 준
+                #   것으로 읽는다 — 그 근거는 policy.py 의 그 손잡이 위에 있다.
+                messages.append({"role": policy.retry_note_role or "user",
+                                 "content": policy.retry_note})
                 continue
             # 걷어낼 것도 없었는데 남는 게 없으면 한 번만 다시 묻는다.
             if not said and policy.retry_when_empty and not retried:
