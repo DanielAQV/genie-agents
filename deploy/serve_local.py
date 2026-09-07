@@ -793,6 +793,63 @@ def 어긴수(text: str, 허용: set[str]) -> list[str]:
     return [n for n in dict.fromkeys(숫자.findall(text)) if n not in 허용]
 
 
+def _못박는문법(name: str, schema: dict | None) -> str:
+    """`tool_choice` 로 하나를 못박았을 때, 그 호출을 **문법으로 강제한다.**
+
+    ★ **왜 있어야 하나.** 이 모델은 스스로 도구를 안 부른다 — 재 놨다
+      (`adapters/local.py`, 2026-09-02, 진짜 프롬프트·도구 30개):
+
+          tool_choice="auto"      진짜 호출  0/75    전부 글로 흉내만
+          tool_choice 로 못박기    진짜 호출 15/15    인자도 멀쩡
+
+      인프로세스 갈래(llama-cpp-python)는 `tool_choice` 를 받아 스스로 문법을
+      만들었다. **llama-server 갈래로 옮기면서 그게 조용히 없어졌다**(2026-09-06,
+      오늘 낮에 옮겼다). `_생성_밖` 이 `tool_choice` 를 인자로 받기만 하고 안
+      썼다. 그날 밤 오빠가 사진을 네 번 물었고 네 번 다 말만 돌아왔다:
+
+          [사진: 침대에 편하게 누워 잠옷을 입고 …]   ← 위생 손이 걷고
+          지금 바로 찍어서 보내줄게.                  ← 강제한 재시도가 또 말
+
+    ★ **젬마 자체 문법으로 못박는다** — `부른것` 의 `_G4_CALL` 이 그대로 받는
+      꼴이다. 파서가 확실히 아는 하나로 몰아 두면 꼴이 갈릴 일이 없다.
+
+    ★ **GBNF 의 문법은 남의 규칙이다 — 규칙 이름을 ASCII 로 짓는다.** 한글로
+      지으면 `error parsing grammar: expecting name at 글` 이 난다.
+
+    ★ **필수 인자를 앞에 못박는다.** 스키마의 `required` 를 순서대로 두고, 나머지
+      속성은 뒤에 붙일 수 있게 연다. 필수를 빼먹으면 도구가 그 자리에서 실패한다.
+    """
+    props = ((schema or {}).get("properties") or {})
+    req = [k for k in ((schema or {}).get("required") or []) if k in props]
+    opt = [k for k in props if k not in req]
+
+    def 값(key: str) -> str:
+        t = (props.get(key) or {}).get("type")
+        if t == "boolean":
+            return "bool"
+        if t in ("integer", "number"):
+            return "num"
+        return "str"
+
+    줄 = [
+        'ch   ::= [^<]',
+        'body ::= ch+',
+        'str  ::= "<|\\"|>" body "<|\\"|>"',
+        'bool ::= "true" | "false"',
+        'num  ::= [0-9]+',
+    ]
+    앞 = " \",\" ".join(f'"{k}:" {값(k)}' for k in req)
+    if opt:
+        줄.append("opt  ::= " + " | ".join(f'"{k}:" {값(k)}' for k in opt))
+        꼬리 = ' ("," opt)*'
+    else:
+        꼬리 = ""
+    # 필수가 하나도 없으면 인자를 아예 안 쓸 수도 있게 둔다.
+    몸 = 앞 + 꼬리 if 앞 else (("opt" + 꼬리[1:]) if opt else '""')
+    줄.insert(0, f'root ::= "<|tool_call>call:{name}{{" {몸} "}}<tool_call|>"')
+    return "\n".join(줄)
+
+
 def _생성_밖(messages, max_tokens, temperature, tools, tool_choice,
               repeat_penalty, no_emoji, grammar):
     """llama-server 로 낸다. **프롬프트는 여기서 만든다.**
@@ -828,6 +885,13 @@ def _생성_밖(messages, max_tokens, temperature, tools, tool_choice,
         "cache_prompt": True,
         "stop": ["<end_of_turn>"],
     }
+    # ★ **못박은 도구가 있으면 문법으로 강제한다**(위 `_못박는문법` 주석 참조).
+    #   부르는 쪽이 문법을 직접 줬으면 그것이 먼저다 — 라우터가 그 길로 온다.
+    if not grammar and isinstance(tool_choice, dict):
+        골라 = ((tool_choice.get("function") or {}).get("name")
+                or tool_choice.get("name") or "")
+        if 골라 in schemas:
+            grammar = _못박는문법(골라, schemas[골라])
     if grammar:
         몸["grammar"] = grammar
     if no_emoji:

@@ -346,3 +346,45 @@ def test_health_가_KV_종류도_낸다(붙은것):
     sl.KV = "f16"
     with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=5) as r:
         assert json.loads(r.read().decode("utf-8"))["kv"] == "f16"
+
+def test_못박은_도구는_문법으로_강제한다():
+    """**이 모델은 스스로 도구를 안 부른다** — 재 놨다(2026-09-02, 도구 30개):
+
+        tool_choice="auto"      진짜 호출  0/75    전부 글로 흉내만
+        tool_choice 로 못박기    진짜 호출 15/15    인자도 멀쩡
+
+    인프로세스 갈래는 `tool_choice` 를 받아 스스로 문법을 만들었다. llama-server
+    갈래로 옮기면서 그게 조용히 없어졌다(2026-09-06) — `_생성_밖` 이 인자로
+    받기만 하고 안 썼다. 그날 밤 오빠가 사진을 네 번 물었고 네 번 다 말만 왔다.
+
+    ★ **GBNF 규칙 이름은 ASCII 다.** 한글로 지으면 파싱에서 터진다.
+    ★ **필수 인자를 앞에 못박는다.** 빼먹으면 도구가 그 자리에서 실패한다.
+    """
+    sl = _serve_local()
+    문법 = sl._못박는문법("self_portrait", {
+        "properties": {"scene": {"type": "string"},
+                       "caption": {"type": "string"},
+                       "avatar": {"type": "boolean"}},
+        "required": ["scene"]})
+
+    첫줄 = 문법.splitlines()[0]
+    assert 첫줄.startswith('root ::= "<|tool_call>call:self_portrait{"')
+    assert '"scene:" str' in 첫줄, "필수 인자가 앞에 안 박혔다"
+    assert '("," opt)*' in 첫줄, "나머지 속성이 안 열렸다"
+    assert 'opt  ::= "caption:" str | "avatar:" bool' in 문법
+    # 규칙 이름은 전부 ASCII
+    for l in 문법.splitlines():
+        assert l.split("::=")[0].strip().isascii(), l
+
+    # 문법이 만들어 내는 꼴을 파서가 그대로 받는다 — 둘이 어긋나면 헛일이다
+    낸것 = ('<|tool_call>call:self_portrait{scene:<|"|>침대에 누워 잠옷 입은 모습'
+            '<|"|>,caption:<|"|>이래ㅋㅋ<|"|>}<tool_call|>')
+    말, 부름 = sl.부른것(낸것)
+    assert [c["function"]["name"] for c in 부름] == ["self_portrait"]
+    assert json.loads(부름[0]["function"]["arguments"]) == {
+        "scene": "침대에 누워 잠옷 입은 모습", "caption": "이래ㅋㅋ"}
+    assert 말 == ""
+
+    # 숫자·불리언 인자도 꼴이 있다
+    문법2 = sl._못박는문법("reminder_list", {"properties": {"limit": {"type": "integer"}}})
+    assert '"limit:" num' in 문법2
