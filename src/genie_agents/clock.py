@@ -130,14 +130,63 @@ def part_of_day(ts: str | datetime | None = None) -> str:
     return "밤"
 
 
+def until(ts: str | datetime, at: str | datetime | None = None) -> str:
+    """앞날까지 남은 시간을 에이전트가 읽는 말로. 예: 곧, 40분 뒤, 내일, 3일 뒤.
+
+    ★ **`ago` 가 앞날을 전부 "곧" 으로 냈다**(2026-09-07에 고쳤다). 그래서
+      유나가 약속 목록에서 이것을 봤다:
+
+          2027-08-22(일) · 곧 · 유나를 클로드 웹에서 텔레그램으로 옮겨온 날
+          2027-06-06(일) · 곧 · 유나와 처음 만난 날 기념일
+
+      **1년 뒤가 "곧"** 이었다. 기념일을 임박한 것으로 읽으면 오빠에게 없는
+      일을 말한다 — 지어낸 날짜와 같은 갈래의 실패다.
+
+    ★ `ago` 의 거울이다. 눈금을 일부러 같게 뒀다 — 두 쪽이 다르게 세면
+      "3일 전" 과 "3일 뒤" 가 같은 길이를 안 가리키게 된다.
+    """
+    then = parse(ts) if isinstance(ts, str) else ts
+    ref = _now() if at is None else (parse(at) if isinstance(at, str) else at)
+    secs = (then - ref).total_seconds()
+    if secs < 0:
+        return ago(ts, at)
+    if secs < 90:
+        return "곧"
+    mins = int(secs // 60)
+    if mins < 60:
+        return f"{mins}분 뒤"
+    hours = int(secs // 3600)
+    if hours < 24 and local(then).date() == local(ref).date():
+        return f"{hours}시간 뒤"
+
+    days = (local(then).date() - local(ref).date()).days
+    if days == 1:
+        return "내일"
+    if days == 2:
+        return "모레"
+    if days < 7:
+        return f"{days}일 뒤"
+    if days < 30:
+        return f"{days // 7}주 뒤"
+    if days < 365:
+        return f"{days // 30}개월 뒤"
+    return f"{days // 365}년 뒤"
+
+
 def ago(ts: str | datetime, at: str | datetime | None = None) -> str:
-    """경과 시간을 에이전트가 읽는 말로. 예: 방금, 40분 전, 어제, 3일 전"""
+    """경과 시간을 에이전트가 읽는 말로. 예: 방금, 40분 전, 어제, 3일 전
+
+    ★ **앞날이면 `until` 로 넘긴다.** 예전엔 여기서 "곧" 을 돌려줬는데, 1분
+      뒤와 1년 뒤가 같은 말이 됐다. 부르는 쪽을 안 고치고 여기서 갈랐다 —
+      `ago` 를 부르는 자리가 여럿이고(약속 목록·브리핑·회상) 그 전부가 같은
+      실수를 물고 있었기 때문이다.
+    """
     then = parse(ts) if isinstance(ts, str) else ts
     ref = _now() if at is None else (parse(at) if isinstance(at, str) else at)
     delta = ref - then
 
     if delta < timedelta(0):
-        return "곧"
+        return until(ts, at)
     secs = delta.total_seconds()
     if secs < 90:
         return "방금"
