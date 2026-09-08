@@ -224,6 +224,8 @@ def shrink(raw: bytes, mime: str) -> tuple[bytes, str]:
 
     ★ **방향을 지킨다.** 다시 인코딩하면 EXIF 표시가 날아가서 세로로 찍은
       사진이 눕는다. 표시를 읽어 픽셀을 실제로 돌린다(`orientation`).
+      **돌리는 자리는 우리 `transpose` 하나뿐이어야 한다** — ffmpeg 도 스스로
+      돌리려 들어서 `-noautorotate` 로 못 박았다(아래 주석).
 
     사진만 줄인다. 소리와 영상은 안 건드린다 — 소리는 이미 작고(mp3 수백 KB),
     영상은 다시 인코딩하는 값이 크고 무엇을 잃는지도 사진과 다르다.
@@ -250,8 +252,30 @@ def shrink(raw: bytes, mime: str) -> tuple[bytes, str]:
         src, dst = Path(tmp) / "in", Path(tmp) / "out.jpg"
         src.write_bytes(raw)
         try:
+            # ★ **`-noautorotate` 는 `-i` 앞에 온다.** ffmpeg 은 디코딩할 때 EXIF
+            #   방향을 **스스로 적용한다.** 그러면 위 `TURN` 의 `transpose` 가 두 번째
+            #   회전이 되어 사진이 어긋난 채로 들어간다 — 오빠가 신고한 "폰으로 사진을
+            #   보내면 사진이 회전해서 들어간다" 가 이것이다.
+            #
+            #   ffmpeg 9.0.1 로 쟀다. orient=6 짜리 2400x1800 을 필터 없이 그냥 다시
+            #   인코딩하면 1800x2400 이 나오고(스스로 돌린다), `-noautorotate` 를
+            #   붙이면 2400x1800 그대로다(안 돌린다).
+            #
+            #   붙이기 전에는 여덟 값 중 **일곱**이 어긋났다. 5·6·7·8 은 회전이 두 번
+            #   걸려 눕고, 게다가 `scale` 이 **이미 돌아간** 1800x2400 에 걸려
+            #   `SHRINK_WIDTH`(1600)가 2134 로 샜다. 2·3·4 는 거울·180 이 두 번 걸려
+            #   제자리로 돌아왔다 — 크기가 안 바뀌어서 크기로는 안 보이고 네 칸에
+            #   다른 색을 칠해 재야 보였다.
+            #
+            #   **자동 회전에 맡기고 `TURN` 을 지우는 쪽은 안 택했다.** 자동 회전은
+            #   ffmpeg 판에 딸린 동작이라(정지 사진에 대해 옛 판은 안 돌렸다) 서버의
+            #   판이 올라가면 조용히 반대로 틀린다. `-noautorotate` 는 어느 판에서든
+            #   "돌리지 마라" 하나만 뜻해서 판에 안 걸린다. 이 옵션을 모르는 아주 옛
+            #   판이면 ffmpeg 이 0 이 아닌 값으로 끝나고, 그러면 바로 아래에서
+            #   **원본을 그대로 돌려준다** — 첫째 원칙대로 사진이 사라지지 않는다.
             done = subprocess.run(
-                ["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", str(src),
+                ["ffmpeg", "-nostdin", "-loglevel", "error", "-y",
+                 "-noautorotate", "-i", str(src),
                  "-frames:v", "1", "-vf", ",".join(steps),
                  "-q:v", str(SHRINK_QUALITY), str(dst)],
                 capture_output=True,

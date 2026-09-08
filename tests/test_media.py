@@ -5,6 +5,12 @@
 사진과 말은 남아야 한다.
 """
 
+import os
+import shutil
+import subprocess
+
+import pytest
+
 from genie_agents import media as M
 
 SOI = bytes.fromhex("ffd8")  # JPEG 시작
@@ -56,8 +62,12 @@ def test_형식을_모르면_안_건드린다():
 # 사진이 눕는다. 큰 사진을 작게 만들려다 사진을 눕히면 안 된다.
 
 
-def _jpeg_facing(value: int) -> bytes:
-    """EXIF 방향 하나만 든 최소 JPEG. little-endian TIFF."""
+def _exif_app1(value: int) -> bytes:
+    """EXIF 방향 하나만 든 APP1 조각. little-endian TIFF.
+
+    조각을 따로 뽑아 둔 이유: **진짜 사진에 끼워 넣는 자리**가 아래에 있다
+    (`_방향을_박은`). 바이트를 두 군데 적으면 언젠가 한쪽만 고친다.
+    """
     ifd = (
         (1).to_bytes(2, "little")  # 태그 한 개
         + (0x0112).to_bytes(2, "little")  # Orientation
@@ -69,7 +79,12 @@ def _jpeg_facing(value: int) -> bytes:
     )
     tiff = b"II" + (42).to_bytes(2, "little") + (8).to_bytes(4, "little") + ifd
     app1 = b"Exif" + bytes(2) + tiff
-    return SOI + APP1 + (len(app1) + 2).to_bytes(2, "big") + app1 + SOS
+    return APP1 + (len(app1) + 2).to_bytes(2, "big") + app1
+
+
+def _jpeg_facing(value: int) -> bytes:
+    """EXIF 방향 하나만 든 최소 JPEG. 그림 자료는 없다 — 표만 읽히면 된다."""
+    return SOI + _exif_app1(value) + SOS
 
 
 def test_방향_표를_읽는다():
@@ -93,6 +108,269 @@ def test_돌리는_필터가_여덟_가지_다_있다():
     """EXIF 는 1~8 을 쓴다. 하나라도 빠지면 그 사진만 눕는다."""
     assert sorted(M.TURN) == [1, 2, 3, 4, 5, 6, 7, 8]
     assert M.TURN[1] == "", "1 은 안 돌리는 것이다"
+
+
+# ── 방향: 픽셀을 실제로 재 본다 (2026-09-08) ───────────────────────────
+#
+# 위의 시험들은 **표를 읽는 것**과 **표에 여덟 칸이 다 있는 것**까지만 지킨다.
+# 그 둘이 다 맞는데도 사진이 돌아서 들어왔다 — 오빠 신고: "폰으로 사진을
+# 보내면 사진이 회전해서 들어간다."
+#
+# 어디가 어긋났나: **ffmpeg 이 디코딩할 때 EXIF 방향을 이미 스스로 적용한다.**
+# 그 위에 `TURN` 의 transpose 를 또 얹으니 두 번 돈다. 여기서 직접 쟀다
+# (ffmpeg 9.0.1, 입력 2400x1800 가로, orient=6):
+#
+#   필터 없이 그냥 재인코딩          → 1800x2400   ffmpeg 이 스스로 돌린다
+#   -noautorotate 붙이고 재인코딩    → 2400x1800   안 돌린다
+#
+# 그래서 이 자리는 **나온 픽셀의 가로세로를 잰다.** 표를 읽었나가 아니라
+# 사진이 똑바로 나왔나가 지켜야 하는 것이다. 판정에 픽셀을 견주지는 않는다 —
+# 90°짜리(5·6·7·8)는 결과가 세로여야 하고 나머지는 가로 그대로라서 가로세로만
+# 봐도 갈린다. 좌우 뒤집기(2·4)는 가로세로가 안 바뀌므로 여기서 못 잡는다.
+
+_원본_너비, _원본_높이 = 2400, 1800  # SHRINK_WIDTH 보다 넓어야 줄이는 손이 실제로 돈다
+
+# CI 에는 ffmpeg 이 없을 수 있다. 없으면 건너뛴다 — **재는 시험이라 흉내로
+# 대신할 수 없다.** ffprobe 도 같이 본다: 판정이 그것으로 나온다.
+재야_한다 = pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+    reason="ffmpeg/ffprobe 가 없다 — 나온 픽셀을 실제로 재는 시험이다",
+)
+
+
+def _크기(raw: bytes) -> tuple[int, int]:
+    """ffprobe 로 (가로, 세로). 결과를 눈으로 못 보니 이것이 판정이다."""
+    done = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", "-"],
+        input=raw,
+        capture_output=True,
+    )
+    w, h = done.stdout.decode().strip().split("x")
+    return int(w), int(h)
+
+
+def _방향을_박은(raw: bytes, value: int) -> bytes:
+    """SOI 뒤에 EXIF APP1 을 끼운다 — 폰이 내놓는 모양이다."""
+    return raw[:2] + _exif_app1(value) + raw[2:]
+
+
+# 시험용 사진의 네 귀퉁이에 칠하는 색. 좌상 빨강 · 우상 파랑 · 좌하 초록 · 우하 하양.
+_색 = {
+    "빨강": b"\xff\x00\x00",
+    "파랑": b"\x00\x00\xff",
+    "초록": b"\x00\xff\x00",
+    "하양": b"\xff\xff\xff",
+}
+_칠하는_폭 = 240  # 귀퉁이 사각형 한 변(픽셀). 1600 으로 줄여도 160px 라 가운데를 찍기 쉽다
+
+# EXIF 값 → 바로 선 사진의 (좌상, 우상, 좌하, 우하) 귀퉁이. EXIF 정의 그대로다:
+# 2 좌우 뒤집기 · 3 180° · 4 위아래 뒤집기 · 5 주대각선 뒤집기 · 6 시계 90° ·
+# 7 반대대각선 뒤집기 · 8 반시계 90°.
+_바로_선_모습 = {
+    1: ("빨강", "파랑", "초록", "하양"),
+    2: ("파랑", "빨강", "하양", "초록"),
+    3: ("하양", "초록", "파랑", "빨강"),
+    4: ("초록", "하양", "빨강", "파랑"),
+    5: ("빨강", "초록", "파랑", "하양"),
+    6: ("초록", "빨강", "하양", "파랑"),
+    7: ("하양", "파랑", "초록", "빨강"),
+    8: ("파랑", "하양", "빨강", "초록"),
+}
+
+
+def _네_귀퉁이(raw: bytes, w: int, h: int) -> tuple[str, ...]:
+    """나온 사진의 (좌상, 우상, 좌하, 우하) 귀퉁이 색 이름.
+
+    ★ **가로세로만으로는 뒤집힘을 못 잡는다** — 좌우/위아래 뒤집기는 크기가
+      안 바뀐다. 그래서 어느 귀퉁이가 어디로 갔나를 본다.
+
+    크기는 받아 쓴다. 여기서 또 ffprobe 를 부르면 프로세스가 여덟 번 더 뜬다.
+    """
+    done = subprocess.run(
+        ["ffmpeg", "-nostdin", "-loglevel", "error", "-i", "-", "-frames:v", "1",
+         "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+        input=raw,
+        capture_output=True,
+    )
+    화면 = done.stdout
+    안쪽 = 30  # JPEG 은 경계에서 번진다. 귀퉁이에서 조금 들어와 찍는다
+    이름들 = []
+    for x, y in ((안쪽, 안쪽), (w - 1 - 안쪽, 안쪽), (안쪽, h - 1 - 안쪽), (w - 1 - 안쪽, h - 1 - 안쪽)):
+        점 = 화면[(y * w + x) * 3 :][:3]
+        이름들.append(min(_색, key=lambda 이름: sum(abs(점[i] - _색[이름][i]) for i in range(3))))
+    return tuple(이름들)
+
+
+@pytest.fixture(scope="module")
+def 큰_사진() -> bytes:
+    """SHRINK_FLOOR 를 넘는 가로 사진 한 장. **잡음으로 만든다.**
+
+    ★ **400KB 를 넘겨야 한다.** 그보다 작으면 `shrink` 가 ffmpeg 을 아예 안
+      타고 원본을 그대로 돌려준다 — 통과하지만 아무것도 안 잰 시험이 된다.
+      실제로 95KB 짜리로 재서 무효 측정을 한 번 냈다(2026-09-08).
+
+    잡음을 쓰는 이유는 JPEG 이 그걸 못 눌러서다. 단색이나 무늬는 몇 KB 로
+    줄어든다. `-f lavfi -i noise=...` 는 안 된다 — `noise` 는 소스 필터가 아니다.
+
+    네 귀퉁이만 색을 칠한다. **어느 귀퉁이가 어디로 갔나**로 뒤집힘까지 보려면
+    귀퉁이가 서로 구별되어야 한다(`_네_귀퉁이`). 칠하는 자리는 좁게 둔다 —
+    넓히면 그만큼 잘 눌려서 400KB 를 못 넘길 수 있다.
+    """
+    잡음 = os.urandom(_원본_너비 * _원본_높이 * 3)
+    한_줄 = _원본_너비 * 3
+    줄들 = []
+    for y in range(_원본_높이):
+        줄 = 잡음[y * 한_줄 : (y + 1) * 한_줄]
+        if y < _칠하는_폭:
+            왼, 오른 = _색["빨강"], _색["파랑"]
+        elif y >= _원본_높이 - _칠하는_폭:
+            왼, 오른 = _색["초록"], _색["하양"]
+        else:
+            줄들.append(줄)
+            continue
+        줄들.append(왼 * _칠하는_폭 + 줄[_칠하는_폭 * 3 : 한_줄 - _칠하는_폭 * 3] + 오른 * _칠하는_폭)
+    raw = b"".join(줄들)
+
+    done = subprocess.run(
+        ["ffmpeg", "-nostdin", "-loglevel", "error", "-y",
+         "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{_원본_너비}x{_원본_높이}",
+         "-i", "-", "-frames:v", "1", "-q:v", "2",
+         "-f", "image2pipe", "-vcodec", "mjpeg", "-"],
+        input=raw,
+        capture_output=True,
+    )
+    사진 = done.stdout
+    if len(사진) <= M.SHRINK_FLOOR:
+        pytest.skip(f"시험용 사진이 SHRINK_FLOOR 를 못 넘었다 ({len(사진)}바이트)")
+    return 사진
+
+
+@pytest.fixture(scope="module")
+def 줄인_결과(큰_사진) -> dict[int, tuple[bytes, int, int, bool]]:
+    """여덟 방향을 한 번만 줄여 놓고 나눠 쓴다 — {방향: (사진, 가로, 세로, 줄였나)}.
+
+    한 원인에서 증상이 셋이라(눕는 것 · 뒤집히는 것 · 안 줄어드는 것) 시험이
+    셋인데 줄이는 일은 같다. 따로 줄이면 ffmpeg 이 열여섯 번 더 돈다.
+    """
+    잰_것 = {}
+    for value in (1, 2, 3, 4, 5, 6, 7, 8):
+        들어간것 = _방향을_박은(큰_사진, value)
+        나온것, _ = M.shrink(들어간것, "image/jpeg")
+        w, h = _크기(나온것)
+        잰_것[value] = (나온것, w, h, 나온것 != 들어간것)
+    return 잰_것
+
+
+@재야_한다
+def test_돌려_찍은_사진이_그대로_서서_나온다(줄인_결과):
+    """★ **줄이면서 사진을 돌려 놓으면 안 된다.**
+
+    폰으로 세로로 찍은 사진(orient 6·8)과 거꾸로 잡고 찍은 것(5·7)은 EXIF 가
+    90° 를 말한다. 그러니 줄인 결과는 **세로**여야 한다. 1·2·3·4 는 가로 그대로다.
+
+    안 지키면 오빠가 보낸 사진이 방에 누워서 들어간다 — 보낼 때는 똑바로
+    보인다(화면은 파일을 그대로 미리보기한다). 서버를 지나면서 돌아간다.
+    """
+    어긋남 = []
+    for value, (_사진, w, h, _줄였다) in sorted(줄인_결과.items()):
+        세로여야 = value in (5, 6, 7, 8)
+        if (h > w) != 세로여야:
+            어긋남.append(
+                f"orient {value} (필터 {M.TURN[value] or '없음'}) → {w}x{h}"
+                f" · {'세로' if 세로여야 else '가로'} 여야 한다"
+            )
+    assert not 어긋남, "줄이면서 사진이 돌아갔다:\n  " + "\n  ".join(어긋남)
+
+
+@재야_한다
+def test_긴_변이_상한을_안_넘는다(줄인_결과):
+    """★ **줄이는 것이 이 함수의 본래 일이다.**
+
+    `scale='min(1600,iw)':-2` 는 **돌리기 전 가로**를 보고 자른다. 뒤에
+    transpose 가 붙으면 자른 뒤에 90° 가 돌아서 긴 변이 다시 1600 을 넘는다 —
+    2400x1800 을 넣으면 2134x1600 이 나온다(ffmpeg 9.0.1 실측).
+
+    방향과 한 원인이지만 **따로 못 박는다.** 방향만 고치고 이 자리를 안 보면
+    사진이 서기는 서는데 여전히 크고, 큰 것을 막으려고 이 함수를 부른다.
+    """
+    샌_것 = []
+    for value, (_사진, w, h, 줄였다) in sorted(줄인_결과.items()):
+        if max(w, h) > M.SHRINK_WIDTH:
+            샌_것.append(
+                f"orient {value} → {w}x{h}"
+                + ("" if 줄였다 else " (아예 안 줄었다 — 원본이 그대로 왔다)")
+            )
+    assert not 샌_것, (
+        f"긴 변이 SHRINK_WIDTH({M.SHRINK_WIDTH}) 를 넘었다:\n  " + "\n  ".join(샌_것)
+    )
+
+
+@재야_한다
+def test_뒤집어_찍은_사진도_바로_서서_나온다(줄인_결과):
+    """★ **가로세로가 안 바뀌는 어긋남이 있다.** 좌우 뒤집기(2)·180°(3)·
+      위아래 뒤집기(4)는 크기가 그대로라 위의 두 시험이 다 초록인데도 사진이
+      뒤집혀 들어갈 수 있다. 그래서 귀퉁이 색으로 잰다.
+
+      ffmpeg 이 스스로 돌린 위에 `TURN` 을 또 얹으면 hflip 이 두 번 걸려
+      제자리로 돌아온다 — 거울에 비친 사진이 안 뒤집힌 채로 들어간다.
+      여덟 값 중 어긋난 것이 넷이 아니라 **일곱**이었던 이유가 이것이다.
+    """
+    어긋남 = []
+    for value, (사진, w, h, _줄였다) in sorted(줄인_결과.items()):
+        본_것 = _네_귀퉁이(사진, w, h)
+        if 본_것 != _바로_선_모습[value]:
+            어긋남.append(
+                f"orient {value} (필터 {M.TURN[value] or '없음'})"
+                f" 좌상·우상·좌하·우하 = {'·'.join(본_것)}"
+                f" · {'·'.join(_바로_선_모습[value])} 여야 한다"
+            )
+    assert not 어긋남, "줄인 사진의 귀퉁이가 제자리에 없다:\n  " + "\n  ".join(어긋남)
+
+
+def test_안_줄인_사진은_EXIF_가_살아_있다():
+    """SHRINK_FLOOR 아래는 원본 그대로 나간다 — **바이트 하나도 안 건드린다.**
+
+    안 줄이면 픽셀이 안 돌아가므로 방향은 EXIF 표시에 남아 있어야 하고,
+    브라우저가 그것을 보고 돌려 준다. 여기서 EXIF 를 떼면 **작은 사진만** 눕는다.
+    돌리는 손을 고치면서 EXIF 를 지우는 손을 같이 넣기 쉬운 자리라 못 박는다.
+    """
+    작은_사진 = SOI + _exif_app1(6) + bytes(M.SHRINK_FLOOR // 2) + SOS
+    assert len(작은_사진) <= M.SHRINK_FLOOR, "이 시험은 FLOOR 아래를 재는 것이다"
+    나온것, mime = M.shrink(작은_사진, "image/jpeg")
+    assert (나온것, mime) == (작은_사진, "image/jpeg")
+    assert M.orientation(나온것) == 6, "EXIF 방향이 살아 있어야 브라우저가 돌려 준다"
+
+
+def test_ffmpeg_이_실패하면_원본이_그대로_온다(monkeypatch):
+    """★ **줄이다 실패했다고 사진이 사라지면 안 된다.**(`shrink` 머리말)
+
+    0 이 아닌 값이 나오는 일은 실제로 있었다 — 폰 사진에 미리보기 프레임이
+    같이 들어 있어서 반환값 234 가 났다. 그때도 사진은 안 줄어들기만 했고
+    사라지지는 않았다. 그 자리를 지킨다.
+    """
+    사진 = SOI + _exif_app1(6) + bytes(M.SHRINK_FLOOR + 1) + SOS
+    monkeypatch.setattr("shutil.which", lambda name: "ffmpeg")  # 있는 척한다
+
+    class 실패:
+        returncode = 234
+        stdout = stderr = b""
+
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: 실패())
+    assert M.shrink(사진, "image/jpeg") == (사진, "image/jpeg")
+
+
+def test_ffmpeg_이_시간을_넘겨도_원본이_그대로_온다(monkeypatch):
+    """터지는 쪽도 같다. 예외가 밖으로 나가면 사진뿐 아니라 **사용자 말까지**
+    못 간다 — `shrink` 를 부르는 자리는 메시지를 만드는 길목이다."""
+    사진 = SOI + _exif_app1(6) + bytes(M.SHRINK_FLOOR + 1) + SOS
+    monkeypatch.setattr("shutil.which", lambda name: "ffmpeg")
+
+    def 시간초과(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="ffmpeg", timeout=M.SHRINK_TIMEOUT)
+
+    monkeypatch.setattr("subprocess.run", 시간초과)
+    assert M.shrink(사진, "image/jpeg") == (사진, "image/jpeg")
 
 
 # ── 풀기 ──────────────────────────────────────────────────────────────
