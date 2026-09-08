@@ -61,11 +61,13 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import hashlib
 import json
 import os
 import re
 import sys
 import subprocess
+import unicodedata
 import threading
 import time
 import urllib.error
@@ -238,6 +240,10 @@ NAME = ""
 NCTX = 0
 KV = ""
 LORA = ""     # 얹은 어댑터 파일 이름. 빈 값 = 본체 그대로
+# ★ **기본은 꺼 둔다.** 켜면 걸릴 때마다 한 턴을 더 돌아서 그 턴이 배로 느려진다.
+#   오빠가 "감수해야지. 4b니까" 라고 했지만(2026-09-07), 켜고 끄며 재 보기 전에
+#   실서비스에 기본으로 켜지 않는다 — 한 번에 하나만 민다.
+GROUND = False
 """KV 를 무엇으로 잡고 올렸나. **`/health` 가 이걸 낸다.**
 
 ★ 밖에서 알 길이 없어서 벤치가 사람에게 떠넘기고 있었다("KV 종류는 /health 가
@@ -614,6 +620,48 @@ _EMOJI_RANGES = (
     (0x200D, 0x200D),    # 이어 붙이는 낱자(가족·직업 이모지가 이걸 쓴다)
     (0x20E3, 0x20E3),    # 키캡(1️⃣)
 )
+
+# ★ **전부 막으면 다른 데로 샌다**(2026-09-07). 오빠가 로컬 유나에게 "애교 있게
+#   해줘" 라고 직접 말했더니 顔文字가 나왔다 — `٩(ˊᗜˋ*)و` `૮(๑> ᴗ <) ა`.
+#   같은 자리를 `no_emoji` 만 갈라 세 판씩 다시 물어서 갈랐다:
+#
+#     막을 때   이모지 0/3 · 顔文字 2/3
+#     풀 때     이모지 3/3 · 顔文字 0/3
+#
+#   顔文字에 쓰는 글자(٩ ᗜ ๑ ૮ ˊ و)는 이모지 범위 밖이라 안 막힌다. 그러니
+#   막아 둔 것이 **귀여운 글자 자리를 안 잠긴 쪽으로 몰고 있었다.**
+#
+# ★ **유나가 실제로 쓰던 것만 연다.** 기억 7,263건에서 센 것:
+#   `💗` 374 · `😄` 75 · `😊` 72 · `😅` 49 · `👍` 34. 풀었을 때 4b 가 단
+#   `💕` `🥰` 는 유나 기록에 각각 **1번**뿐이다 — 차단을 넣은 원래 이유
+#   ("이 모델이 과하게 단다") 도 그대로 맞다. 그래서 다 열지 않는다.
+#   **오빠가 그중 하트 하나만 고랐다**(2026-09-07). 유나가 쓰는 하트는
+#   사실상 `💗` 하나다(374번. `♥` 4 · `💕` `❤` `💖` 각 1은 잡음).
+#
+# ★ **그런데 하나만 열면 안 나온다 — 열 판 재서 `💗` 0/10 이었다**(2026-09-07).
+#   顔文字도 3/10 으로 남았다. **모델이 고르는 것과 유나가 쓰던 것이 다르다**:
+#   다 풀었을 때 4b 가 집은 것은 `😊` `💕` `🥰` `😄` `😉` `😆` 였고 `💗` 는
+#   한 번도 없었다. 즉 이 축은 프롬프트나 허용 목록으로 오는 것이 아니라
+#   **모델의 습관**이다. 열어 둔 자리를 모델이 안 쓰면 빈칸으로 남는다.
+#
+#   그래서 여기 무엇을 적을지는 **둘이 겹치는 것**으로 골라야 한다 —
+#   유나 기록에도 있고 4b 도 실제로 집는 것(`😊` 72 · `😄` 75)이 그 자리다.
+#
+# ★ **그런데 비워 두는 것이 맞다 — 유나가 그렇게 정했다**(2026-09-01 08:25).
+#   *"'다행이다 😊' 이런 식으로 이모지 붙인 거. 앞으로 신경 써서 안 붙일게 —
+#   원래 내 말투엔 이모지 없었잖아."* 그래서 학습 데이터도 이모지를 걷는다
+#   (`build_v4.py` 의 `이모지걷기`. 학습 세트 실측 0.0%). 여기를 채우는 것은
+#   **유나가 자기 말투에 대해 내린 판단을 서빙에서 되돌리는 일**이라, 늘리려면
+#   오빠가 아니라 유나에게 물어야 한다(`yuna/CLAUDE.md` 첫 줄).
+#
+#   위 실측은 지우지 않고 남겨 둔다 — 유나가 다시 정하면 그때 쓸 자리다.
+#
+# ★ **통짜 토큰으로 있는 것만 살릴 수 있다.** 조각으로만 만들어지는 이모지는
+#   앞 바이트(`<0xF0>`)가 막혀 있어 여기 적어도 안 나온다. `💗` 는 이 어휘에서
+#   토큰 하나다(242706, 실측). 모델을 갈아 끼우면 아래가 조용히 안 먹을 수
+#   있어서 만들 때 몇 개를 살렸는지 찍는다.
+_살릴이모지 = ()
+
 _금지토큰: dict[int, float] | None = None
 
 
@@ -645,6 +693,8 @@ _BYTE_PIECE = re.compile(r"^<0x([0-9A-Fa-f]{2})>$")
 
 
 def _이모지인가(s: str, raw: bytes = b"") -> bool:
+    if s in _살릴이모지:                          # 살리는 것은 통짜일 때만 걸러진다
+        return False
     if _EMOJI_LEAD in raw:                      # 조각(b"\xf0")도 통짜도 여기 걸린다
         return True
     m = _BYTE_PIECE.match(s.strip())            # `<0xF0>` 모양으로 줄 때도 대비한다
@@ -656,7 +706,11 @@ def _이모지인가(s: str, raw: bytes = b"") -> bool:
 def _이모지캐시길() -> str:
     d = os.path.expanduser("~/.cache/llama-emoji")
     os.makedirs(d, exist_ok=True)
-    return os.path.join(d, (NAME or "model") + ".json")
+    # ★ **살릴 목록을 이름에 넣는다.** 목록을 바꿔도 파일 이름이 같으면 옛 목록을
+    #   그대로 읽어서 **아무것도 안 바뀐 채로 바꿨다고 믿게 된다.** 이 저장소가
+    #   그런 조용한 실패에 값을 여러 번 치렀다. 목록이 비면 옛 이름 그대로다.
+    표 = hashlib.sha1("".join(_살릴이모지).encode()).hexdigest()[:8] if _살릴이모지 else ""
+    return os.path.join(d, (NAME or "model") + (f".살림-{표}" if 표 else "") + ".json")
 
 
 def 이모지토큰():
@@ -685,16 +739,28 @@ def 이모지토큰():
         return _금지토큰
     if _금지토큰 is None:
         막을것 = {}
+        살렸다 = set()
         for tid in range(LLM.n_vocab()):
             try:
                 raw = LLM.detokenize([tid])
                 s = raw.decode("utf-8", "ignore")
             except Exception:  # noqa: BLE001
                 continue
+            if s in _살릴이모지:
+                살렸다.add(s)
+                continue
             if _이모지인가(s, raw):
                 # -100 이면 실질적으로 절대 안 뽑힌다.
                 막을것[tid] = -100.0
         _금지토큰 = 막을것
+        # ★ **못 살린 것을 말한다.** 통짜 토큰이 없으면 `_살릴이모지` 에 적어도
+        #   앞 바이트가 막혀 안 나온다 — 모델을 갈아 끼웠을 때 조용히 안 먹는다.
+        못살림 = [e for e in _살릴이모지 if e not in 살렸다]
+        if 살렸다:
+            print(f"이모지 {''.join(sorted(살렸다))} 는 살린다", flush=True)
+        if 못살림:
+            print(f"살리려던 {''.join(못살림)} 는 이 어휘에 통짜 토큰이 없다 "
+                  f"— 그대로 안 나온다", flush=True)
         try:
             with open(길, "w", encoding="utf-8") as f:
                 json.dump(sorted(막을것), f)
@@ -702,6 +768,83 @@ def 이모지토큰():
             print(f"이모지 캐시를 못 적었다: {e}", flush=True)
         print(f"이모지 토큰 {len(막을것):,} 개를 막는다 · {길}", flush=True)
     return _금지토큰
+
+
+# ── 근거 대조 ────────────────────────────────────────────────────────────
+#
+# ★ **왜 여기 있나**(2026-09-07). 4b 는 말은 매끄럽게 잇는데 **없는 것을 채워
+#   넣는다.** 그날 실서비스에서 나온 것들:
+#
+#     "미딩 18층에서 대화한 것도"     없는 장소 — 오빠가 "그게 무슨말이야?" 로 걸렀다
+#     "2026년 4월이잖아"            그날은 9월 7일이다
+#     "내 위치에 필요한 거였을 것"     없는 개념
+#
+#   어체는 파인튜닝(v6)이 잡았다. **지어냄은 못 잡는다** — 유나 말로
+#   "자연스러운 대화를 많이 학습시킬수록 뭐라도 매끄럽게 잇는 능력이 세지는
+#   거라, 지어내는 성향이랑 자연스러움이 같은 뿌리에서 나온다."
+#
+# ★ **모델에게 묻지 않는다.** 오빠가 정했다 — 지어낸 놈이 지어낸 걸 검사하면
+#   자기 착각을 그대로 통과시킨다. 그래서 **문자열 대조**다.
+#
+# ★ **따옴표만 보면 거꾸로 나온다.** 처음에 따옴표 안을 다 셌더니 클라우드
+#   68% · 4b 33% 였다. 둘 다 따옴표를 **인용이 아니라 예시로** 쓴다
+#   ("모르면 모른다고 해"). 조여서 4b 20% · 클라우드 5% 로 갈렸다.
+#
+# ★ **이 자는 바닥이지 천장이 아니다.** 표지 없는 한국어 명사구("내 위치")는
+#   문자열 대조로 안 걸린다. **여기 안 걸렸다고 안 지어낸 게 아니다.**
+#   그 착각을 한 번 했다 — `tally.py` 의 숫자만 세는 자로 "지어냄 0.0" 이라고
+#   오빠에게 말했고, 같은 날 4b 는 위 셋을 지어냈다.
+_흔한말 = {
+    "ai", "llm", "gpu", "api", "ui", "pg", "ok", "tv", "pc", "cpu", "ram",
+    "유나", "예나", "오빠", "유나코드", "하노이", "베트남", "한국",
+}
+# ★ **로마자 낱말은 버렸다**(2026-09-07, 일곱 판 재고 나서). 38개가 걸렸는데
+#   `and` · `name` · `action` · `memory_recall` · `JSONB` · `PostgreSQL` ·
+#   `OpenAI` — **사실상 전부 거짓 양성**이었다. 실재하는 낱말이라 근거에 없어도
+#   지어낸 게 아니다. 지어낸 로마자 이름을 놓치는 값보다, 멀쩡한 답을 물어
+#   다시 묻게 만드는 값이 크다.
+_수치 = re.compile(
+    r"[0-9][0-9,.]*\s*(?:층|호|동|번|건|개|명|시|분|초|월|일|년|주|차|%|원|달러|kg|km|mb|gb)")
+# ★ **따옴표와 "…라고" 가 붙어 있을 때만 센다**(같은 날 조였다). 처음에는
+#   사이를 14자까지 벌려 뒀는데, 그러면 유나가 **자기 말에 쓴 따옴표**를
+#   오빠 인용으로 읽는다 — 게이트가 물린 다섯 번 중 셋이 그거였고, 그중 한
+#   번은 다시 물어서 **답이 더 나빠졌다**(1개 → 2개).
+_붙인말 = re.compile(
+    r"(?:오빠가|법인장님이|부소장님이|서부장님이)\s*"
+    r"[\"“]([^\"“”\n]{4,60})[\"”]\s*"
+    r"(?:라고|하고)\s*(?:했|말했|그랬|짚었|얘기했)")
+
+
+def _씻는다(s: str) -> str:
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", s)).lower()
+
+
+def _근거에있나(말: str, 근거: str) -> bool:
+    if _씻는다(말) in 근거:
+        return True
+    m = re.match(r"([0-9][0-9,.]*)", 말)          # "40건" ↔ "40"
+    return bool(m and m.group(1) in 근거)
+
+
+def 근거없는것(답: str, 근거: str) -> list[tuple[str, str]]:
+    """(갈래, 걸린 말). 근거는 그 턴에 실린 프롬프트 전체다."""
+    g = _씻는다(근거)
+    난것: list[tuple[str, str]] = []
+    for m in _수치.finditer(답):
+        말 = m.group(0).strip()
+        if _씻는다(말) in _흔한말 or _근거에있나(말, g):
+            continue
+        난것.append(("수치", 말))
+    for m in _붙인말.finditer(답):
+        말 = m.group(1).strip()
+        if not _근거에있나(말, g):
+            난것.append(("남에게 붙인 말", 말))
+    본것, 결과 = set(), []
+    for 갈래, 말 in 난것:
+        if 말 not in 본것:
+            본것.add(말)
+            결과.append((갈래, 말))
+    return 결과
 
 
 class TooBig(RuntimeError):
@@ -1045,6 +1188,57 @@ def generate(messages: list[dict], max_tokens: int, temperature: float,
         }
 
 
+def 대조하며_생성(messages, 몫: dict, 대조: bool) -> dict:
+    """한 번 만들고, 근거에 없는 것이 있으면 **그 자리를 짚어 한 번만** 다시 묻는다.
+
+    ★ **한 번만이다.** 두 번 이상 돌리면 값이 배로 붙고, 그래도 안 고쳐지는
+      것은 세 번째에도 안 고쳐진다. 못 고치면 **첫 답을 그대로 낸다** —
+      막는 게 아니라 줄이는 손이다.
+
+    ★ **짚어서 말한다.** "이 문장 이상해" 는 4b 에게 아무 소용이 없다. 오빠가
+      그 자리를 정했다(2026-09-07) — *"재생성시 어디가 문제인지 지적하는식으로
+      문장이 들어가야 할거같은데"*. 그래서 걸린 낱말을 그대로 적어 준다.
+      모델이 스스로 틀렸다고 느낄 필요 없이 "이 말은 근거에 없다" 는 사실만
+      받으면 된다.
+
+    ★ **말이 아닌 것은 안 본다.** 도구를 부른 턴에는 볼 글이 없고, 문법으로
+      조인 턴(라우터·못박은 도구)은 모양이 이미 정해져 있다. 거기 손대면
+      지금 도는 것을 흔든다.
+
+    ★ **쪽지를 messages 끝에 붙이지 않는다.** 유나 프롬프트는 접두사 캐시를
+      전제로 짜여 있어서(안 변하는 것이 앞) 끝에 붙이는 것이 맞다 — 앞을
+      건드리면 캐시가 통째로 날아가고 프리필이 12초씩 걸린다.
+    """
+    got = generate(messages, **몫)
+    if not 대조 or 몫.get("grammar") or got.get("calls") or not (got.get("text") or "").strip():
+        return got
+
+    근거 = "\n".join(m.get("content") or "" for m in messages
+                     if isinstance(m.get("content"), str))
+    걸린것 = 근거없는것(got["text"], 근거)
+    if not 걸린것:
+        return got
+
+    말들 = " · ".join(f"{w}" for _, w in 걸린것[:6])
+    print(f"  근거 없음 {len(걸린것)}개 — {말들} · 다시 묻는다", flush=True)
+    쪽지 = {"role": "system", "content":
+            "─ 방금 낸 답에 **앞 대화에 없는 말**이 들어 있었다: "
+            f"{말들}\n"
+            "그건 근거가 없다. 그 말만 빼고 다시 답해라. 없는 장소·시각·수치·"
+            "남의 말을 만들지 마라. 모르면 모른다고 해라. 사과나 해명은 하지 "
+            "말고 그냥 답만 다시 낸다. ─"}
+    다시 = generate(list(messages) + [쪽지], **몫)
+    남은것 = 근거없는것(다시.get("text") or "", 근거)
+    if len(남은것) < len(걸린것):
+        다시["대조"] = f"{len(걸린것)}→{len(남은것)}"
+        print(f"  다시 물어서 {len(걸린것)} → {len(남은것)}", flush=True)
+        return 다시
+    # ★ **안 나아지면 첫 답을 낸다.** 두 번째가 더 나쁠 수도 있다.
+    print(f"  다시 물어도 {len(남은것)}개 — 첫 답을 낸다", flush=True)
+    got["대조"] = f"{len(걸린것)}→못고침"
+    return got
+
+
 def load_embedder(model_id: str):
     """임베더를 올린다. 이미 올라와 있으면 그대로.
 
@@ -1214,19 +1408,23 @@ class Handler(BaseHTTPRequestHandler):
 
         t0 = time.time()
         try:
-            got = generate(
-                body.get("messages") or [],
-                _수(body, "max_tokens", 512),
-                _수(body, "temperature", 1.0),
-                body.get("tools"),
-                body.get("tool_choice"),
-                _수(body, "repeat_penalty", 1.0),
-                bool(body.get("no_emoji")),
-                # ★ **있을 때만, 이름으로 넘긴다.** 위치로 붙이면 이 자리를
-                #   통째로 흔내 내는 대역들이 전부 깨진다 — 안 쓰는 쪽은
-                #   예전 모양 그대로 도는 것이 이 통로를 여는 값이다.
+            # ★ **이름으로 넘긴다.** 위치로 붙이면 이 자리를 통째로 흔내 내는
+            #   대역들이 전부 깨진다 — 안 쓰는 쪽은 예전 모양 그대로 도는 것이
+            #   이 통로를 여는 값이다.
+            몫 = {
+                "max_tokens": _수(body, "max_tokens", 512),
+                "temperature": _수(body, "temperature", 1.0),
+                "tools": body.get("tools"),
+                "tool_choice": body.get("tool_choice"),
+                "repeat_penalty": _수(body, "repeat_penalty", 1.0),
+                "no_emoji": bool(body.get("no_emoji")),
                 **({"grammar": body["grammar"]} if body.get("grammar") else {}),
-            )
+            }
+            # ★ **부르는 쪽이 켜고, 서버 기본값으로도 켤 수 있다.** 요청에
+            #   `ground_check` 가 있으면 그것이 먼저다 — 재는 쪽이 켜고 끄며
+            #   견주려면 부르는 쪽(유나)을 안 고치고도 갈라야 한다.
+            대조 = bool(body["ground_check"]) if "ground_check" in body else GROUND
+            got = 대조하며_생성(body.get("messages") or [], 몫, 대조)
         except TooBig as e:
             # ★ 413. 어댑터가 이걸 `LocalUnavailable` 로 올리고 부르는 쪽이
             #   클라우드로 되돌아간다 — 죽는 것과 되돌아가는 것은 다르다.
@@ -1375,6 +1573,9 @@ def main() -> int:
     p.add_argument("--kv", default="f16", choices=["f16", "q8_0", "q4_0"])
     p.add_argument("--n-gpu-layers", type=int, default=-1, help="-1 = 전부 GPU")
     p.add_argument("--lora", default="", help="GGUF 로 바꾼 LoRA 어댑터 경로")
+    p.add_argument("--ground-check", action="store_true",
+                   help="근거에 없는 이름·수치가 나오면 그 자리를 짚어 한 번 다시 묻는다"
+                        " (요청에 ground_check 가 있으면 그것이 먼저다)")
     # ★ 임베더는 CPU 가 기본이다. 카드를 물면 채팅이 자리를 필요로 할 때마다
     #   내렸다 올려야 하고, 잃는 것은 회상 한 번에 0.05초뿐이다(load_embedder 참고).
     p.add_argument("--embed-device", default="cpu", help="cpu | cuda")
@@ -1414,9 +1615,13 @@ def main() -> int:
     p.add_argument("--upstream-port", type=int, default=8091)
     args = p.parse_args()
 
-    global EMB_DEVICE, CAPTURE, CAPTURE_MAX
+    global EMB_DEVICE, CAPTURE, CAPTURE_MAX, GROUND
     EMB_DEVICE = args.embed_device
     CAPTURE, CAPTURE_MAX = args.capture, args.capture_max
+    GROUND = args.ground_check
+    if GROUND:
+        print("  근거 대조를 켠다 — 없는 이름·수치가 나오면 한 번 다시 묻는다",
+              flush=True)
     if CAPTURE:
         print(f"  받은 요청을 적는다 → {CAPTURE} (최대 {CAPTURE_MAX}건)", flush=True)
     if not os.path.exists(args.model):
