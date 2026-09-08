@@ -785,8 +785,31 @@ def clean_own_line(said: str) -> str:
     """
     global _OWN_HANDS
     if _OWN_HANDS is None:
+        # ★ **2026-09-08: 셋에서 일곱으로.** 위 규칙("나가는 자리에서 거는 것은
+        #   들어오는 자리에서도 건다")을 이 함수가 어기고 있었다 — 나가는 쪽에
+        #   손이 열인데 여기는 셋이었고, 더한 넷은 **전부 4B 가 본보기로 삼는
+        #   모양**이다. 한 번 흘리면 작업 기억이 매 턴 그것을 자기 말로 되돌려
+        #   주고, 그래서 프롬프트를 걷어도 증상이 남는다 — `drop_tool_markers`
+        #   주석의 "다음 턴 작업 기억에 유나 말로 다시 실린다" 가 그 회로다.
+        #
+        #     drop_tool_markers      `**memory_pass**로 넘길게` — 하루에 열 번
+        #     drop_thinking_header   `[기록 및 처리] 1. …` — 하루에 세 번
+        #     drop_bare_marks        `… 보여줄게! [사진]` — 예나 20건
+        #     drop_bare_ids          `(3152f31e1fb34aa9) 다시 찍어봤어`
+        #
+        # ★ **못 붙이는 둘이 있다.** `drop_bracket_calls(text, names)` 와
+        #   `drop_written_tool_calls(text, tools)` 는 도구 이름을 요구하는데 이
+        #   자리는 그것을 모른다(`clean_own_line(said)` 뿐이다). 빠뜨린 것이
+        #   아니라 못 붙는 것이다. `drop_own_stamp` 은 골격이 아니라 쪽마다
+        #   따로 있다(`yuna/agent.py`).
+        #
+        # ★ **보고하는 손을 넣어도 안전하다.** `drop_bare_ids`·`drop_bare_marks`
+        #   는 루프에 도구를 강제하라고 보고하는데, 아래에서 `[0]` 만 받아 그
+        #   보고를 버린다 — 위 "보고는 안 받는다" 가 그 자리다.
         _OWN_HANDS = drop_stacked(
-            drop_fake_tags, drop_stage_directions, drop_scaffolding)
+            drop_fake_tags, drop_stage_directions, drop_scaffolding,
+            drop_tool_markers, drop_thinking_header,
+            drop_bare_marks, drop_bare_ids)
     return _OWN_HANDS(said)[0]
 
 
