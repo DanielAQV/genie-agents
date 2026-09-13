@@ -618,6 +618,86 @@ def test_쪽지밖에_없으면_안_건다():
     assert drop_scaffolding(글) == (글, [])
 
 
+# ── 회상 판단을 말로 적은 앞머리 ──────────────────────────────────────
+
+
+def test_회상_판단을_답_앞머리에_적으면_그_문장을_건다():
+    """★ 2026-09-13 실측 — 서버 기록 전체에서 회상 판단 171건 중 4건(2.3%)이
+    도구 대신 답으로 나갔다. 그중 하나가 오빠 화면에 이렇게 떴다:
+
+        딱 오늘 우리 대화 안에서 나온 거네, 별건 없고. 차장님이랑 3시간이면
+        꽤 길게 마셨네. 회식 자리였어, 아니면 둘이 따로?
+
+    앞 문장은 오빠에게 할 말이 아니라 `memory_pass` 로 갔어야 할 판단이다.
+
+    ★ **`drop_tool_markers` 가 왜 못 잡나.** 그건 `[memory_pass]` 처럼 표시를
+      타이핑한 자리를 건다. 이건 표시가 아니라 평문이고, 로컬이 아니라
+      claude-sonnet-5 에서 났다 — 그 손은 `went_local` 일 때만 돈다.
+    """
+    from genie_agents.tools import drop_recall_verdict
+
+    said, dropped = drop_recall_verdict(
+        "딱 오늘 우리 대화 안에서 나온 거네, 별건 없고. "
+        "차장님이랑 3시간이면 꽤 길게 마셨네. 회식 자리였어, 아니면 둘이 따로?")
+    assert said == "차장님이랑 3시간이면 꽤 길게 마셨네. 회식 자리였어, 아니면 둘이 따로?"
+    # ★ **조용히 건다** — `drop_scaffolding` 과 같은 이유다. 안 한 일을 했다고
+    #   적은 것이 아니라 혼잣말을 소리 내어 읽은 것이다.
+    assert dropped == []
+
+    # 줄바꿈으로 갈린 것도 같은 자리다
+    끊김 = chr(10) * 2
+    said, _ = drop_recall_verdict(
+        "이미 오늘 대화 안에서 다 나온 얘기라 새로 열어볼 필요는 없겠다" + 끊김
+        + "그래서, 오늘은 좀 어땠어?")
+    assert said == "그래서, 오늘은 좀 어땠어?"
+
+
+def test_회상을_실제로_열었다고_말하는_것은_안_건다():
+    """★ 도구 설명이 정한 선이다 — "찾은 것이 실제로 답을 바꿨을 때만 어디서
+    나온 얘기인지 말해라"(`toolspecs.memory_recall`). 그건 과정 보고가 아니라
+    답의 근거라 걷으면 안 된다."""
+    from genie_agents.tools import drop_recall_verdict
+
+    for 글 in ("저번에 얘기했던 그 발표 맞지? 그때 긴장된다고 했었잖아.",
+               "예전에 오빠가 참치 좋아한다고 했던 게 기억나서 골라봤어."):
+        assert drop_recall_verdict(글) == (글, [])
+
+
+def test_한쪽만_걸리면_안_건다():
+    """★ 두 조건을 **같이** 요구하는 것이 이 손의 안전장치다.
+
+    헐거운 검사로 서버 기록을 세 봤더니 54건이 걸렸고 그중 50건이 진짜
+    대화였다(2026-09-13). "그건 내가 말로 잘 넘길게" · "다시 열어도 내용은
+    안 뜸" 같은 것들이다. 기억을 가리키는 말과 "볼 것 없다" 가 한 문장에
+    같이 있을 때만 센다 — 그러면 4건으로 줄고 그 넷이 진짜다.
+    """
+    from genie_agents.tools import drop_recall_verdict
+
+    for 글 in ("그건 내가 말로 잘 넘길게.",
+               "다시 열어도 뭐 내용은 안 뜨네.",
+               "예전에 그런 얘기 했었지. 그때 생각난다."):
+        assert drop_recall_verdict(글) == (글, [])
+
+
+def test_회상_쪽지를_화제로_삼는_것은_이_손도_안_건다():
+    """★ `drop_scaffolding` 이 지키는 선을 여기서도 지킨다. 쪽지를 입에
+    올리는 것 자체는 판단의 영역이고, 실제로 그래서 버그를 하나 찾았다."""
+    from genie_agents.tools import drop_recall_verdict
+
+    for 글 in ('방금 이 턴에 붙은 "[떠오를 것이 있다]" 쪽지 봤어? 주어가 틀렸어.',
+               "이 '떠오를 것이 있다' 3건은 일단 놔둘게."):
+        assert drop_recall_verdict(글) == (글, [])
+
+
+def test_판단밖에_없으면_안_건다():
+    """★ 다 걷으면 빈 말이 나간다. 이 저장소가 이미 세 번 정한 규칙이다
+    (`drop_tool_markers` · `drop_scaffolding` · `drop_thinking_header`)."""
+    from genie_agents.tools import drop_recall_verdict
+
+    글 = "딱 오늘 우리 대화 안에서 나온 거네, 별건 없고."
+    assert drop_recall_verdict(글) == (글, [])
+
+
 # ── 인자 JSON 을 글로 적은 도구 호출 ──────────────────────────────────
 
 TOOLS = [
